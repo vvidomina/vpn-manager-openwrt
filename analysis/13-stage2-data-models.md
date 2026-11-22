@@ -18,7 +18,7 @@
 | `Profile` | правила маршрутизации | `prf_<id>` | `profiles.json` |
 | `Assignment` | сервер → профиль, устройство → режим | составной | `assignments.json` |
 | `Device` | клиент LAN | MAC (нормализованный) | `devices.json` |
-| `DnsPolicy` | цепочка, AAAA-режим | singleton | `dns.json` |
+| `DnsPolicy` | цепочка; AAAA-режим **не используется в v1** (reserved, v2) | singleton | `dns.json` |
 | `UdpPolicy` | режим UDP, allowlist | singleton | `settings.json` |
 | `Transaction` | применение конфигурации | `tx_<id>` | журнал + `/tmp` |
 | `JournalEvent` | событие | `seq` | кольцо Flash + `/tmp` |
@@ -271,7 +271,7 @@ stateDiagram-v2
 
 ## 8. Журналы (D-09)
 
-**Flash (`/etc/vpnmanager/journal/events.log`)** — JSONL, только важные события: `intent_changed`, `state_changed` (с причиной), `failover`, `emergency`, `apply/rollback`, `guard_failed`, `storage_error`, `disabled_by_user`, `recovered_after_crash`.
+**Flash (`/etc/vpnmanager/journal/events.log`)** — JSONL, только важные события: `intent_changed`, `state_changed` (с причиной), `failover`, `emergency`, `apply/rollback`, `storage_error`, `disabled_by_user`, `recovered_after_crash`.
 Поля: `seq`, `ts`, `type`, `severity`, `actor` (`user|system|watchdog`), `data` (без секретов).
 Ротация: 256 КБ → `.1`; rate limit на повторяющиеся события (например, не чаще 1/мин на тип); при переполнении — счётчик подавленных.
 

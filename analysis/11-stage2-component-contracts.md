@@ -12,7 +12,7 @@
 
 **Ответственность и границы.** Жизненный цикл демона, регистрация модулей, очередь операций изменения, единый mutex сети, внутренняя шина событий, вычисление состояния VPN по шести признакам (D-14). Не выполняет системных изменений сам — только координирует.
 
-**Входы.** ubus-вызовы от API; события модулей (процесс, здоровье сервера, политика, Guard, WAN); сигналы procd.
+**Входы.** ubus-вызовы от API; события модулей (процесс, здоровье сервера, политика, WAN); сигналы procd.
 **Выходы.** Команды модулям; публичные события `state.changed`, `op.progress`; runtime-снимок для статуса.
 
 **Публичные методы и события.**
@@ -22,7 +22,7 @@
 
 **Состояния и ошибки.** Состояния системы — из §5 документа №10 (11 значений). Ошибки: `VM_ERR_BUSY` (идёт другая операция), `VM_ERR_INVALID_STATE` (операция невозможна в текущем состоянии), `VM_ERR_TIMEOUT`, `VM_ERR_INTERNAL`.
 
-**Взаимодействие.** Вызывает Transaction Manager для любых изменений; подписывается на Failover/Guard/DNS; отдаёт снимок API и Diagnostics.
+**Взаимодействие.** Вызывает Transaction Manager для любых изменений; подписывается на Failover/DNS (Guard — только задел v2); отдаёт снимок API и Diagnostics.
 
 **Владение.** Очередь операций, mutex, runtime-состояние в `/tmp/vpnmanager`. Не владеет ни одним системным сетевым ресурсом.
 
@@ -45,8 +45,8 @@
 **Входы.** ubus-запросы LuCI/CLI; rpcd-сессия и ACL.
 **Выходы.** JSON-ответы по схемам (§12); события `vpnmanager.event`.
 
-**Публичные методы и события.** Объекты: `vpnmanager` (status/enable/disable), `vpnmanager.config`, `vpnmanager.servers`, `vpnmanager.subscriptions`, `vpnmanager.profiles`, `vpnmanager.devices`, `vpnmanager.dns`, `vpnmanager.policy`, `vpnmanager.ipv6`, `vpnmanager.diagnostics`, `vpnmanager.backup`, `vpnmanager.operation`. Полный перечень — документ №12 §3.
-События: `state`, `config`, `servers`, `devices`, `dns`, `ipv6`, `operation`, `log`.
+**Публичные методы и события.** Объекты: `vpnmanager` (status/enable/disable), `vpnmanager.config`, `vpnmanager.servers`, `vpnmanager.subscriptions`, `vpnmanager.profiles`, `vpnmanager.devices`, `vpnmanager.dns`, `vpnmanager.policy`, ~~`vpnmanager.ipv6`~~ (reserved, v2), `vpnmanager.diagnostics`, `vpnmanager.backup`, `vpnmanager.operation`. Полный перечень — документ №12 §3.
+События: `state`, `config`, `servers`, `devices`, `dns`, `operation`, `log` (`ipv6` — reserved, v2).
 
 **Состояния и ошибки.** Коды `VM_OK`, `VM_ERR_INVALID_ARGUMENT`, `VM_ERR_NOT_FOUND`, `VM_ERR_CONFLICT`, `VM_ERR_BUSY`, `VM_ERR_FORBIDDEN`, `VM_ERR_UNSUPPORTED`, `VM_ERR_TIMEOUT`, `VM_ERR_INTERNAL`, `VM_ERR_STORAGE`, `VM_ERR_VALIDATION`, `VM_ERR_ROLLED_BACK`.
 
@@ -117,7 +117,7 @@ type DNS interface {
     Configure(ctx, Policy) error
     Switch(ctx, Chain) error          // без полного рестарта dnsmasq, если возможно
     Status(ctx) (Status, error)       // active chain, upstream, latency, fallback
-    ApplyAAAA(ctx, Mode) error        // filter|pass, только для LAN
+    // ApplyAAAA — зарезервировано (v2): AAAA не фильтруются в v1
 }
 ```
 События: `dns.upstream_changed`, `dns.fallback_entered`, `dns.fallback_left`, `dns.check_failed`.
@@ -136,7 +136,7 @@ type DNS interface {
 1. В любой момент можно доказать, какой upstream использован (T-? / ТЗ §9).
 2. Переключение цепочки не требует полного рестарта dnsmasq, либо рестарт ограничен и виден в UI ([Т]).
 3. Нет DNS-петли «dnsmasq → Xray → dnsmasq».
-4. AAAA-политика не создаёт IPv6-обход и не ломает внутренние имена ([Т], P-02).
+4. AAAA не фильтруются: AAAA-политика не является механизмом IPv6-защиты и в v1 не применяется (ТЗ §5, P-02 вне v1).
 5. dnsmasq не слушает адрес WAN (S1-07).
 
 ---
@@ -145,7 +145,7 @@ type DNS interface {
 
 **Ответственность и границы.** Генерация конфига Xray, валидация `xray -test`, запуск/остановка/перезапуск процесса, проверка слушателей, preflight outbound, trial-проверка реального трафика, переключение сервера без «мёртвого порта». Не владеет nft/route и не решает, когда включать VPN (это Core/Transaction).
 
-**Входы.** Сервер + профиль + режим (proxy/direct), политика UDP, порт TPROXY, состояние Guard/DNS.
+**Входы.** Сервер + профиль + режим (proxy/direct), политика UDP, порт TPROXY, состояние DNS (Guard — вне v1).
 **Выходы.** Файл конфига, PID/состояние процесса, результат валидации и проб, событие `xray.*`.
 
 **Публичные методы и события.**
@@ -198,7 +198,7 @@ type Guard interface {
     Status(ctx) (Status, error)
 }
 ```
-События: `ipv6.present`, `ipv6.absent`, `ipv6.guard_failed`, `ipv6.guard_restored`.
+События (только задел v2; в v1 не публикуются): `ipv6.present`, `ipv6.absent`, `ipv6.guard_failed`, `ipv6.guard_restored`.
 
 **Состояния и ошибки.** `ABSENT`, `PRESENT_GUARDED`, `PRESENT_UNGUARDED`, `GUARD_UNKNOWN`. Ошибки: `VM_ERR_GUARD_APPLY`, `VM_ERR_GUARD_VERIFY`.
 
@@ -449,23 +449,23 @@ type Ops interface {
 **Входы.** События `vpnmanager.event`, ответы методов, действия пользователя.
 **Выходы.** ubus-вызовы; отображение статуса, предупреждений, отчётов.
 
-**Экраны (минимум).** Обзор (состояние по D-14, предупреждения IPv6/DNS/WAN); Серверы и профили; Подписки; Устройства; DNS/UDP; Диагностика и backup; Настройки (включая intent).
+**Экраны (минимум).** Обзор (состояние по D-14, предупреждения DNS/WAN); Серверы и профили; Подписки; Устройства; DNS/UDP; Диагностика и backup; Настройки (включая intent).
 
 **Публичные методы и события.** Только через `vpnmanager.*`; подписка на события вместо частого опроса.
 
-**Состояния и ошибки.** Отображает все состояния системы и причины `DEGRADED`; ошибки API — человекочитаемо, с кодом для диагностики. Отдельно и заметно: `DISABLED_BY_USER` («выключено вами»), `DEGRADED/POLICY_NOT_APPLIED` («трафик идёт напрямую»), `PRESENT_UNGUARDED`/`GUARD_UNKNOWN` (IPv6), DNS fallback.
+**Состояния и ошибки.** Отображает все состояния системы и причины `DEGRADED`; ошибки API — человекочитаемо, с кодом для диагностики. Отдельно и заметно: `DISABLED_BY_USER` («выключено вами»), `DEGRADED/POLICY_NOT_APPLIED` («трафик идёт напрямую»), DNS fallback (состояний IPv6 Guard в v1 нет).
 
 **Взаимодействие.** rpcd/ACL → Core; не обращается к файлам и процессам напрямую.
 
 **Владение.** Только представление; никаких системных ресурсов.
 
-**Безопасность.** Никаких секретов в DOM/URL; подтверждение для очистки, restore, отключения Guard; защита от XSS при выводе имён устройств/серверов; нет произвольных команд.
+**Безопасность.** Никаких секретов в DOM/URL; подтверждение для очистки и restore; защита от XSS при выводе имён устройств/серверов; нет произвольных команд.
 
 **Поведение при отказах.** Демон недоступен — понятный экран, а не пустой статус; устаревшие данные помечаются временем; после переподключения — повторная загрузка состояния.
 
 **Критерии приёмки.**
 1. Все состояния D-14 отображаются различимо; «выключено пользователем» не выглядит ошибкой.
-2. Предупреждение о IPv6 видно без перехода вглубь.
+2. Состояний и предупреждений IPv6 Guard в UI нет; обязательного постоянного предупреждения о незащищённом IPv6 в v1 не требуется (ТЗ §5).
 3. Ни одно действие UI не выполняется при отсутствии права.
 4. Тест №27 (отсутствие дублирования настроек) проходит.
 5. Секреты не попадают в браузер после сохранения.

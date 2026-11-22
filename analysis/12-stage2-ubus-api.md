@@ -176,18 +176,20 @@
 | `audit.list` | `{filter, period, limit}` | записи аудита (без секретов) |
 | `audit.undo` | `{entry_id, client_token}` | `op_id` или отказ при зависимостях |
 
+**Методы зарезервированного объекта `vpnmanager.ipv6` — задел v2 (в v1 не регистрируются; любой вызов → `VM_ERR_UNSUPPORTED`):**
+
 | Метод | Запрос | Ответ |
 |---|---|---|
-| `status` | `{}` | см. §4.2 |
+| `status` | `{}` | пример §4.2 (только v2) |
 | `set_guard` | `{enabled, client_token?}` | `{op_id}` |
 
-`set_guard` меняет только собственную цепочку; `network`/`firewall`/RA не трогает.
+В v1 `set_guard` не существует: собственной цепочки нет, `network`/`firewall`/RA не затрагиваются. Имена оставлены зарезервированными для v2.
 
-### 3.10 `vpnmanager.diagnostics`
+### 3.10 `vpnmanager.diagnostics` (вид отчёта `ipv6` зарезервирован, в v1 не формируется)
 
 | Метод | Запрос | Ответ |
 |---|---|---|
-| `report` | `{kind:"summary"\|"network"\|"dns"\|"ipv6"\|"conflicts"\|"storage"}` | `{report}` (read-only) |
+| `report` | `{kind:"summary"\|"network"\|"dns"\|"conflicts"\|"storage"}` | `{report}` (read-only) |
 | `tail` | `{lines:1..500, since_seq?}` | `{events[]}` |
 | `conntrack` | `{}` | `{count, max, percent}` |
 | `listeners` | `{}` | `{items[]}` |
@@ -233,7 +235,6 @@
     {"code": "SERVER_UNREACHABLE", "severity": "warning"},
     {"code": "TRAFFIC_UNVERIFIED", "severity": "warning"}
   ],
-  "ipv6": {"wan_present": false, "guard_installed": true},
   "active": {"server_id": "srv_…", "profile_id": "prf_…"},
   "revision": 42
 }
@@ -241,7 +242,7 @@
 
 Правило: `ACTIVE` невозможен при `fresh:false` у любого обязательного признака.
 
-### 4.2 `vpnmanager.ipv6.status`
+### 4.2 `vpnmanager.ipv6.status` — зарезервировано: пример задела v2 (в v1 не возвращается)
 
 ```json
 {
@@ -284,7 +285,7 @@
 | `servers` | изменение состава/порядка/здоровья | counts, changed_ids |
 | `devices` | online/offline/назначение | mac, mode |
 | `dns` | смена цепочки/fallback | chain, upstream |
-| `ipv6` | появление/исчезновение, сбой Guard | state, sources |
+| ~~`ipv6`~~ | **зарезервировано (v2)**; в v1 событие не публикуется | — |
 | `operation` | прогресс длительной операции | op_id, phase, progress |
 | `log` | важное событие журнала | severity, code |
 
