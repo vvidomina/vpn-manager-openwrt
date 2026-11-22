@@ -58,7 +58,7 @@ graph TD
         POL[Policy Manager]
         XM[Xray Manager]
         DNS[DNS Manager]
-        V6[IPv6 Guard]
+        BL[Blocklists Manager]
         DEV[Device Manager]
         SUB[Subscription Manager]
         PROF[Profile Manager]
@@ -79,13 +79,14 @@ graph TD
 
     V1 & V2 & V3 & V4 & V5 & V6 --> ACL --> OBJ --> CORE
     CORE --> TX
-    TX --> POL & XM & DNS & V6
+    TX --> POL & XM & DNS
     CORE --> DEV & SUB & PROF & FO
     CORE --> ST & J
     POL --> NFT & RULE
     XM --> XR
     DNS --> DM & UCI
-    V6 --> NFT
+    CORE --> BL
+    BL -.->|только решения| POL & DNS
     DEV --> PROC
     ST --> FS
     J --> FS
@@ -107,8 +108,9 @@ graph TD
 | Transaction Manager | staged apply, rollback, recovery | через модули | журнал транзакций, last-good |
 | Policy Manager | nft, fwmark, ip rule, route | **да** | `inet vpnmanager`, таблица 1000, mark |
 | Xray Manager | генерация конфига, процесс, валидация, проверки | **да** | `/etc/xray/config.json`, процесс Xray |
-| DNS Manager | upstream, перехват 53, AAAA-политика | **да** | dnsmasq-секция проекта, include |
-| IPv6 Guard | детект глобального IPv6, ограничение forward | **да** (только свои правила) | цепочка `ipv6_guard` |
+| DNS Manager | upstream, перехват 53, форма ответа при блокировке | **да** | dnsmasq-секция проекта, include |
+| Blocklists Manager | источники, категории, версии, diff, whitelist, системные исключения, статистика | нет (решения передаёт владельцам) | `/etc/vpnmanager/blocklists/**` |
+| ~~IPv6 Guard~~ | ~~детект глобального IPv6, ограничение forward~~ | — | **вне v1** (ТЗ §5); компонент не создаётся |
 | Device Manager | обнаружение, идентичность, назначения | нет (данные) | модель устройств |
 | Subscription Manager | загрузка, разбор, обновление | нет | подписки, серверы |
 | Profile Manager | профили, правила, компиляция | нет | профили, назначения |
@@ -229,7 +231,7 @@ stateDiagram-v2
 | **D** | `disable_ipv6=1` на `br-lan` | Ломает внутренний IPv6 и LuCI по IPv6 | RA/DHCPv6 прекращаются | Ломает служебный IPv6 | Нарушает D-01; отклонён |
 | **E** | Вариант A + отдельное правило для трафика роутера (если появится глобальный IPv6) | Как A | Не меняются | Требует отдельного решения по NAT66/маршрутизации роутера | [О] вне v1; не внедрять |
 
-**Рекомендация [П]:** вариант A в собственной таблице, цепочка `ipv6_guard` в hook `forward` с приоритетом, гарантирующим выполнение **до** accept-правила fw4. Приоритет и точное место — **[Т]** (проверить на W-01/расширенном тесте, что правило реально стоит раньше fw4 и что offload не обходит его).
+**Рекомендация [П]:** вариант A в собственной таблице, цепочка `ipv6_guard` в hook `forward` с приоритетом, гарантирующим выполнение **до** accept-правила fw4. Приоритет и точное место — **[Т]** (проверяется при возврате темы в v2; в v1 W-01 и любые IPv6-тесты запрещены).
 **Fail-closed:** при ошибке установки правила страж не считается работающим (`GUARD_UNKNOWN`), UI показывает предупреждение; тихого «оставили как есть» быть не должно.
 **Что не делается:** IPv6-туннелирование, IPv6 TProxy, NAT66, отключение IPv6-подсистемы.
 
@@ -421,7 +423,7 @@ sequenceDiagram
 
 | Ресурс | Единственный писатель | Кто читает | Транзакция / откат |
 |---|---|---|---|
-| `table inet vpnmanager` (nft) | Policy Manager | Diagnostics, IPv6 Guard (своя цепочка) | `nft -c` → apply → снимок prev |
+| `table inet vpnmanager` (nft) | Policy Manager | Diagnostics (Blocklists — только решения) | `nft -c` → apply → снимок prev |
 | ~~Цепочка `ipv6_guard`~~ | **вне v1** — цепочка не создаётся (решение №11) | — | — |
 | `ip rule` (fwmark) | Policy Manager | Diagnostics | снимок prev, восстановление |
 | Таблица маршрутизации 1000 | Policy Manager | Diagnostics | снимок prev |
@@ -429,7 +431,7 @@ sequenceDiagram
 | `/etc/xray/config.json` | Xray Manager | Xray | prev-копия, атомарная замена |
 | `/etc/config/dhcp` (секция dnsmasq) | DNS Manager (только свои опции) | dnsmasq, LuCI | снимок опций, восстановление |
 | Include DNS-политики `/etc/vpnmanager/dnsmasq.d/*.conf` | DNS Manager | dnsmasq | файл + reload |
-| `/etc/config/network` | **никто** (только чтение) | IPv6 Guard, Diagnostics | не меняется |
+| `/etc/config/network` | **никто** (только чтение) | Diagnostics | не меняется |
 | `/etc/config/firewall` | **никто** (только чтение) | preflight, Diagnostics | не меняется (D-08 — только отчёт) |
 | `/etc/vpnmanager/**` | Storage | все модули | tmp+rename+fsync, prev |
 | `/tmp/vpnmanager/**` | Core/модули | Diagnostics | не переживает ребут |
