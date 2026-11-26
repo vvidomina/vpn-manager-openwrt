@@ -36,7 +36,7 @@
 
 Есть: `xray-core 26.10.21-r1`, `nftables-json 1.1.6-r2`, `kmod-nft-core/nat/tproxy/fib/offload`, `kmod-nf-tproxy`, `kmod-nf-flow`, `kmod-nf-conntrack6`, `firewall4 2025.03.17~b6e51575-r2`, `dnsmasq 2.93-r2`, `odhcpd-ipv6only 2026.06.29`, `odhcp6c 2026.06.27`, `ppp 2.5.2` + `ppp-mod-pppoe`, `rpcd 2026.10.04` (+ `mod-file`, `iwinfo`, `luci`, `rpcsys`, `rrdns`, `ucode`), `ubus/ubusd 2026.06.28`, `ucode 2026.07.09` (+ fs/uci/ubus/rtnl/nl80211/html/log/math/uloop/digest/uclient), `luci-app-firewall`, `luci-app-package-manager`, `luci-app-attendedsysupgrade`, `curl 8.23.0`, `dropbear 2025.89`.
 
-**Отсутствуют:** `dnsmasq-full`, `https-dns-proxy`, `jq`, `python3`, `openssl-util`, `logrotate`, `conntrack` (утилита), `iperf3`, `iptables`/`xtables-nft` (подтверждено: `(no iptables)`).
+**Отсутствуют:** `dnsmasq-full`, `https-dns-proxy`, `jq`, `python3`, `openssl-util`, `logrotate` (не установлен; пакет доступен в официальном feed), `conntrack` (утилита), `iperf3`, `iptables`/`xtables-nft` (подтверждено: `(no iptables)`).
 Следствия: вся логика — в Go; ротация журналов — собственная (D-09); JSON — только через собственный парсер, не `jq`; DoH-транспорт нужно либо реализовывать в Go, либо ставить `https-dns-proxy` (сейчас недоступен на прошивке).
 
 ### 1.3 WAN и маршрутизация
@@ -166,7 +166,7 @@
 | B-14: висячие include passwall2 | подтверждено, файлов-целей нет | ✔ подтверждено |
 | B-04: DNS идёт к провайдеру | подтверждено (`resolv.conf.auto`, `noresolv=0`) | ✔ подтверждено |
 | «проектных nft-таблиц нет» | подтверждено: только `inet fw4` | ✔ подтверждено |
-| Отсутствуют jq/python3/logrotate/https-dns-proxy | подтверждено | ✔ подтверждено |
+| Отсутствуют jq/python3/https-dns-proxy; logrotate не установлен, но есть в feed | подтверждено | ✔ подтверждено (инвентаризация установленного состояния, не запрет пакета) |
 | `/etc/config`: v2raya, zapret | подтверждено (v2raya, zapret.tmp), служб zapret нет | ✔ подтверждено |
 | Старый проект держит режим `vpn` | `mode=vpn` записан, но VPN не работает | ✘ **расхождение состояния** (S1-03) |
 
@@ -223,7 +223,7 @@
 **Статус.** Пункт остаётся фактом обследования. Логика детекта IPv6, о которой здесь говорится, в v1 **не проектируется**: обнаружение глобального IPv6 исключено (ТЗ §5). Требование «не строить детект на догадках» относится к заделу v2 и **не является рекомендацией для v1**.
 
 ### S1-11 [П][А] Нет инструментов, на которые часто рассчитывают
-Нет `jq`, `python3`, `logrotate`, `conntrack`, `iperf3`. Любой сценарий, требующий их, обязан иметь замену (Go, busybox, `/proc`).
+Нет `jq`, `python3`, `conntrack`, `iperf3`. `logrotate` не установлен, но доступен в официальном feed и включён в зависимости сборки U9 (W-15). Сценарии, требующие отсутствующих утилит, обязаны иметь замену (Go, busybox, `/proc`).
 
 ### S1-12 [В][Р] flowtable и политика проекта
 `ft` включает WAN и все LAN-порты, `flow add @ft` стоит в `forward`. Сегодня проектных правил нет, поэтому влияние не проявляется. Для TPROXY-сценария ожидается, что перехваченный трафик уходит в `local` и offload его не затрагивает, но **это не проверено**; риск — «часть трафика проходит мимо политики» при ошибке в порядке цепочек.

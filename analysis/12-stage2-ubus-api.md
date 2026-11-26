@@ -1,6 +1,8 @@
 # Документ №12. Этап 2: ubus/rpcd API и ACL
 
-Дата: 22.11.2026
+**Актуализация U9 (26.11.2026, ред. 2 — по итогам независимого ревью).** Из API выведены `vpnmanager.dns.*` и `vpnmanager.blocklists.*`; удалены `servers.select`/`servers.test`/`servers.reorder`, поле `health`, три режима UDP, `diagnostics.tail` и `diagnostics.conntrack`. Добавлены `vpnmanager.logs`, стратегия, ручной override, автообновление подписки. Разделы §2, §3, §5, §6 и §10 сведены к **одному реестру** (§6): методы, права чтения/записи и события описаны один раз, ACL не содержит методов вне реестра. Идентичность вызывающего (§9) сохраняется.
+
+Дата: 22.11.2026.
 Основание: D-05 (единственный канал — ubus/rpcd, сетевой порт не открывается), D-14 (состояния), документ №11.
 Статусы: **[У]** утверждено, **[П]** предлагается, **[Т]** требует теста, **[О]** открытый вопрос.
 Кодирование не выполнялось; схемы ниже — контракт, а не реализация.
@@ -14,13 +16,13 @@
 | Транспорт | ubus через rpcd; демон не слушает TCP/UDP |
 | Формат | JSON; имена полей — `snake_case`; время — Unix ms UTC |
 | Версии | `api_version` в `vpnmanager.status`; несовместимое изменение — новая мажорная версия |
-| Идентификаторы | строки; серверы — устойчивый ID (документ №13 §3) |
+| Идентификаторы | строки; `srv_id` — идентификатор сервера **в текущем наборе** (документ №13 §3), не межверсийная идентичность |
 | Идемпотентность | изменяющие методы принимают `client_token`; повтор с тем же токеном не создаёт вторую операцию |
-| Длительные операции | возвращают `op_id`; прогресс — `vpnmanager.operation.status` и событие `operation` |
+| Длительные операции | возвращают `op_id`; прогресс — `vpnmanager.operation.status` |
 | Ошибки | объект `{code, message, details?, retry_after?}`; `message` — для человека, `code` — для логики |
 | Ограничения | тело запроса ≤ 256 КБ; список ≤ 1000 записей; строки ≤ 4 КБ (кроме импорта — отдельный лимит) |
 | Секреты | URL подписки, UUID/ключи не возвращаются после сохранения; только маска |
-| Права | проверяются rpcd (ACL) **и** демоном (повторно) |
+| Права | проверяются rpcd (ACL) **и** демоном (повторно) по реестру §6 |
 
 Коды ошибок:
 
@@ -48,20 +50,21 @@
 |---|---|---|
 | `vpnmanager` | состояние, включение/выключение | да |
 | `vpnmanager.config` | настройки, сохранение, apply | да |
-| `vpnmanager.servers` | серверы, выбор, проверка | да |
-| `vpnmanager.subscriptions` | подписки | да |
+| `vpnmanager.servers` | серверы, стратегия, ручной override | да |
+| `vpnmanager.subscriptions` | подписки и автообновление | да |
 | `vpnmanager.profiles` | профили и назначения | да |
 | `vpnmanager.devices` | устройства и режимы | да |
-| `vpnmanager.dns` | DNS-политика | да |
-| `vpnmanager.policy` | UDP-режим, состояние правил | да (UDP) |
-| ~~`vpnmanager.ipv6`~~ | **reserved (v2)** — вне v1, решение №11; объект не регистрируется | нет |
-| `vpnmanager.blocklists` | источники, категории, версии, diff, whitelist, статистика, аварийное отключение | да |
+| `vpnmanager.policy` | состояние правил и UDP allowlist | да (allowlist) |
 | `vpnmanager.maintenance` | вход/выход из Maintenance Mode, проверка компонентов | да |
-| `vpnmanager.audit` | аудит настроек, Undo, история изменений | да (Undo) |
-| `vpnmanager.devices` (bulk) | массовые операции, Dry Run, группы | да |
-| `vpnmanager.diagnostics` | отчёты, журнал | нет |
-| `vpnmanager.backup` | копии | да |
+| `vpnmanager.audit` | аудит изменений настроек, Undo | да (Undo) |
+| `vpnmanager.logs` | два Xray-лога и параметры их ротации | да (порог) |
+| `vpnmanager.diagnostics` | read-only отчёты, слушатели | нет |
+| `vpnmanager.backup` | копии конфигурации | да |
 | `vpnmanager.operation` | статус длительных операций | нет (кроме cancel) |
+
+**Не регистрируются в v1:** `vpnmanager.dns` (DNS — штатный DNS роутера), `vpnmanager.blocklists` (подсистема исключена). Имена не переиспользуются с другой семантикой; вызов любого прежнего метода → `VM_ERR_UNSUPPORTED`.
+
+**Зарезервировано (v2):** `vpnmanager.ipv6` — объект не регистрируется, состояние IPv6 не вычисляется и не публикуется.
 
 ---
 
@@ -76,7 +79,7 @@
 | `disable` | `{reason?, client_token?}` | `{op_id}` |
 | `reload` | `{}` | `{op_id}` — перечитать сохранённое и пересчитать состояние |
 
-`disable` — штатная операция (D-14): останавливает движок, снимает правила, ставит `intent=disabled`, событие `disabled_by_user`. Ошибкой не считается.
+`disable` — штатная операция (D-14): останавливает движок, снимает правила, ставит `intent=disabled`. Ошибкой не считается.
 
 ### 3.2 `vpnmanager.config`
 
@@ -95,10 +98,13 @@
 | Метод | Запрос | Ответ |
 |---|---|---|
 | `list` | `{subscription_id?, offset?, limit?}` | `{total, items[]}` (без секретов) |
-| `get` | `{id}` | `{server, health}` |
-| `select` | `{id, force?, client_token?}` | `{op_id}` — немедленная проверка (D-03) |
-| `test` | `{id}` | `{health}` — без смены активного |
-| `reorder` | `{ids[]}` | `{ok}` |
+| `get` | `{id}` | `{server}`; доступность показывает Observatory, приложение её не хранит |
+| `get_strategy` | `{}` | `{strategy, mode, override_server_id?}` |
+| `set_strategy` | `{strategy, client_token?}` | `{op_id}` |
+| `set_override` | `{server_id?, client_token?}` | `{op_id}`; без `server_id` — возврат в `auto` |
+
+`strategy`: `random` (по умолчанию) | `roundRobin` | `leastPing` | `leastLoad`. Неподдерживаемая версия Xray → `VM_ERR_UNSUPPORTED`.
+`mode`: `auto` | `manual`. Ручной override — один сервер из текущего набора; при недоступности действует `fallbackTag`. Сохранение override при обновлении подписки — §10 и №13 §3.
 
 ### 3.4 `vpnmanager.subscriptions`
 
@@ -110,6 +116,10 @@
 | `remove` | `{id, confirm:true}` | `{ok}` |
 | `reorder` | `{ids[]}` | `{ok}` |
 | `report` | `{id}` | `{accepted, rejected[], reasons[]}` |
+| `get_autoupdate` | `{}` | `{enabled, interval_hours, last_run?, next_run?}` |
+| `set_autoupdate` | `{enabled, interval_hours: 6\|12\|24, client_token?}` | `{ok}` |
+
+Автообновление выключено по умолчанию; планировщик — штатный `crond`. Первый запуск — по выбранному интервалу; немедленный первый запрос не утверждён. Ручное `update` доступно всегда.
 
 ### 3.5 `vpnmanager.profiles`
 
@@ -130,71 +140,58 @@
 | `merge` | `{macs[]}` | `{id}` |
 | `forget` | `{mac, confirm:true}` | `{ok}` |
 
-### 3.7 `vpnmanager.dns`
+### 3.7 `vpnmanager.dns` — **выведен (superseded U9)**
 
-| Метод | Запрос | Ответ |
-|---|---|---|
-| `status` | `{}` | `{chain, upstream, fallback, latency_ms, aaaa_mode}` |
-| `set_chain` | `{chain, client_token?}` | `{op_id}` |
-| `test` | `{domain?}` | `{resolver, answers, latency_ms}` |
-| `set_aaaa` | `{mode:"pass"\|"filter_lan"}` | `{ok, warning?}` |
+Методов нет. DNS в v1 — штатный DNS роутера; приложение не предоставляет API управления DNS, не переключает upstream, не отдаёт DNS-состояний и не выполняет DNS-фильтрацию. Вызов любого прежнего метода возвращает `VM_ERR_UNSUPPORTED`.
 
 ### 3.8 `vpnmanager.policy`
 
 | Метод | Запрос | Ответ |
 |---|---|---|
-| `status` | `{}` | `{applied, table, mark, counters, mismatch}` |
-| `set_udp` | `{mode:"proxy"\|"block"\|"direct", allowlist?}` | `{op_id}` |
+| `status` | `{}` | `{applied, table, mark, mismatch}` |
+| `set_udp` | `{allowlist: [ {port \| from, to} ]}` | `{op_id}` |
+
+Единственный параметр UDP — `allowlist`. Режимов `proxy`/`block`/`direct` нет: UDP вне allowlist идёт DIRECT и не блокируется; Always DIRECT выше allowlist. Пустой список — весь UDP идёт DIRECT.
 
 ### 3.9 `vpnmanager.ipv6` — **RESERVED, ВНЕ v1**
 
 Объект не регистрируется в v1 (ТЗ §5, решение №11). Имена методов сохранены только как задел v2, чтобы не переиспользовать их с другой семантикой. Любой вызов → `VM_ERR_UNSUPPORTED`. Состояние IPv6 не вычисляется и не публикуется.
 
-### 3.9a `vpnmanager.blocklists` (новое)
+### 3.9a `vpnmanager.blocklists` — **выведен (superseded U9)**
 
-| Метод | Запрос | Ответ |
-|---|---|---|
-| `status` | `{}` | состояние подсистемы, активные версии, аномалии |
-| `categories.list` / `categories.set` | `{}` / `{id, enabled}` | категории |
-| `sources.list` / `add` / `update` / `remove` | `{url|path, category, name}` | источник + метаданные |
-| `versions.list` | `{source_id}` | версии со статусом |
-| `diff` | `{from, to}` | компактный diff (add/remove/category) |
-| `dry_run` | `{version_id}` | вердикт без побочных эффектов |
-| `apply` | `{version_id, client_token}` | `op_id` |
-| `rollback` | `{version_id, client_token}` | `op_id` |
-| `whitelist.add` / `remove` | `{domain, permanent, ttl?}` | запись |
-| `system_exceptions.list` | `{}` | список (только чтение) |
-| `sets.get` / `sets.set` | `{device|group}` | набор категорий |
-| `stats` / `export` | `{period}` / `{format, period}` | агрегаты / файл |
-| `emergency_disable` | `{confirm: true}` | состояние `disabled` |
+Методов нет: подсистема Blocklists исключена из проекта. Прежние `status`, `categories.*`, `sources.*`, `versions.*`, `diff`, `dry_run`, `apply`, `rollback`, `whitelist.*`, `sets.*`, `stats`, `emergency_disable` не реализуются; вызов возвращает `VM_ERR_UNSUPPORTED`. События `blocklists.*` не публикуются.
 
-### 3.9b `vpnmanager.maintenance`, `vpnmanager.audit` (новые)
+### 3.9b `vpnmanager.maintenance`, `vpnmanager.audit`
 
 | Объект.метод | Запрос | Ответ |
 |---|---|---|
 | `maintenance.status` / `enter` / `exit` | `{}` / `{reason}` / `{force?}` | состояние + результат проверок компонентов |
-| `audit.list` | `{filter, period, limit}` | записи аудита (без секретов) |
+| `audit.list` | `{filter, period, limit}` | записи аудита настроек (без секретов) |
 | `audit.undo` | `{entry_id, client_token}` | `op_id` или отказ при зависимостях |
 
-**Методы зарезервированного объекта `vpnmanager.ipv6` — задел v2 (в v1 не регистрируются; любой вызов → `VM_ERR_UNSUPPORTED`):**
+Аудит — только изменения настроек. Общей ленты событий приложения в v1 нет.
+
+### 3.10 `vpnmanager.logs`
 
 | Метод | Запрос | Ответ |
 |---|---|---|
-| `status` | `{}` | пример §4.2 (только v2) |
-| `set_guard` | `{enabled, client_token?}` | `{op_id}` |
+| `list` | `{}` | `{files: [{name:"access.log"\|"error.log", size, mtime}]}` |
+| `tail` | `{file, lines: 20\|50\|100}` | `{lines[]}` |
+| `get_rotation` | `{}` | `{threshold_mb, last_run?, result?}` |
+| `set_rotation` | `{threshold_mb, client_token?}` | `{ok}` |
 
-В v1 `set_guard` не существует: собственной цепочки нет, `network`/`firewall`/RA не затрагиваются. Имена оставлены зарезервированными для v2.
+Только два файла Xray. Ручной очистки, удаления и перезапуска Xray ради ротации нет. `threshold_mb` — целое 1…50, по умолчанию 5; диапазон [П] до W-15.
 
-### 3.10 `vpnmanager.diagnostics` (вид отчёта `ipv6` зарезервирован, в v1 не формируется)
+### 3.11 `vpnmanager.diagnostics`
 
 | Метод | Запрос | Ответ |
 |---|---|---|
-| `report` | `{kind:"summary"\|"network"\|"dns"\|"conflicts"\|"storage"}` | `{report}` (read-only) |
-| `tail` | `{lines:1..500, since_seq?}` | `{events[]}` |
-| `conntrack` | `{}` | `{count, max, percent}` |
+| `report` | `{kind:"summary"\|"network"\|"conflicts"\|"storage"}` | `{report}` (read-only) |
 | `listeners` | `{}` | `{items[]}` |
 
-### 3.11 `vpnmanager.backup`
+Журнала событий, `tail` и `conntrack` в API v1 нет. Вид `ipv6` не формируется.
+
+### 3.12 `vpnmanager.backup`
 
 | Метод | Запрос | Ответ |
 |---|---|---|
@@ -202,7 +199,7 @@
 | `list` | `{}` | `{items[]}` |
 | `restore` | `{path, confirm:true, client_token?}` | `{op_id}` |
 
-### 3.12 `vpnmanager.operation`
+### 3.13 `vpnmanager.operation`
 
 | Метод | Запрос | Ответ |
 |---|---|---|
@@ -219,7 +216,7 @@
 {
   "api_version": 1,
   "state": "DEGRADED",
-  "substate": "SERVER_UNREACHABLE",
+  "substate": "TRAFFIC_UNVERIFIED",
   "intent": "enabled",
   "config_state": "Applied",
   "since": 1795344000000,
@@ -228,19 +225,19 @@
     "process": {"value": "running", "pid": 4211, "ts": 1795343995000, "fresh": true},
     "config": {"value": "valid", "hash": "…", "ts": 1795343000000, "fresh": true},
     "policy": {"value": "applied", "ts": 1795343990000, "fresh": true},
-    "server": {"value": "unreachable", "fails": 2, "ts": 1795343999000, "fresh": true},
     "traffic": {"value": "unverified", "ts": 1795343800000, "fresh": false}
   },
   "warnings": [
-    {"code": "SERVER_UNREACHABLE", "severity": "warning"},
     {"code": "TRAFFIC_UNVERIFIED", "severity": "warning"}
   ],
-  "active": {"server_id": "srv_…", "profile_id": "prf_…"},
+  "active": {"server_id": "srv_…", "profile_id": "prf_…", "selection": "auto"},
   "revision": 42
 }
 ```
 
-Правило: `ACTIVE` невозможен при `fresh:false` у любого обязательного признака.
+Правило: `ACTIVE` невозможен при `fresh:false` у любого обязательного признака. Отдельного признака «здоровье сервера» нет: доступность сообщает Observatory.
+
+**Наблюдаемость (OQ-14).** Поля `servers` и `fallback` в `status` не публикуются, пока владелец не выберет разрешённый источник данных (№20 §3.1, REQ-168). До этого `status` содержит только S1–S4 и S6, а `service.fallback_entered`/`service.fallback_left` не отправляются. Признак S5 в примере не показан по той же причине.
 
 ### 4.2 `vpnmanager.ipv6.status` — зарезервировано: пример задела v2 (в v1 не возвращается)
 
@@ -282,20 +279,57 @@
 | `state` | смена состояния/подсостояния | from, to, reason, signals_hash |
 | `intent` | enable/disable | value, initiator |
 | `config` | saved/applied/pending/invalid | revision, state |
-| `servers` | изменение состава/порядка/здоровья | counts, changed_ids |
+| `servers` | изменение состава серверов, стратегии или override | strategy, mode, changed_ids |
 | `devices` | online/offline/назначение | mac, mode |
-| `dns` | смена цепочки/fallback | chain, upstream |
-| ~~`ipv6`~~ | **зарезервировано (v2)**; в v1 событие не публикуется | — |
 | `operation` | прогресс длительной операции | op_id, phase, progress |
-| `log` | важное событие журнала | severity, code |
+| `service.fallback_entered` / `service.fallback_left` | вход/выход из `FALLBACK_*` | `FALLBACK_DIRECT`/`FALLBACK_BLOCK`; **не публикуются до решения OQ-14** |
+| `subscription.updated` / `subscription.update_failed` | результат обновления | accepted, rejected |
+| `strategy.changed` | смена стратегии | from, to |
+| `override.set` / `override.preserved` / `override.reset` | ручной выбор | server_id, reason |
+| `logrotate.completed` / `logrotate.failed` | результат ротации | file, size |
+
+**Не публикуются:** `dns.*`, `blocklists.*`, `server.down`/`server.up`, событие `log`. Общей пользовательской ленты событий нет; события `state`/`intent`/`config`/`operation` — транзиентные сигналы текущего статуса, а не история.
 
 Требования: монотонный `seq`; события не содержат секретов; при переполнении буфера UI получает `resync_required` и перечитывает `status`.
 
 ---
 
-## 6. ACL
+## 6. Единый реестр объектов, методов и прав
 
-Файл `/usr/share/rpcd/acl.d/luci-app-vpnmanager.json` (имя — [П]). Три группы:
+**Это единственный источник истины для API, ACL, контрактов и UI.** Метод, которого нет в таблице, не существует; ACL не может ссылаться на метод вне таблицы.
+
+Группы ACL: **read** — просмотр и диагностика; **control** — управление VPN и данными; **admin** — backup/restore и удаление записей.
+
+| Объект | Метод | read | control | admin |
+|---|---|---|---|---|
+| `vpnmanager` | `status` | да | да | да |
+| `vpnmanager` | `enable`, `disable`, `reload` | — | да | — |
+| `vpnmanager.config` | `get` | да | да | да |
+| `vpnmanager.config` | `set`, `apply`, `discard`, `validate` | — | да | — |
+| `vpnmanager.servers` | `list`, `get`, `get_strategy` | да | да | да |
+| `vpnmanager.servers` | `set_strategy`, `set_override` | — | да | — |
+| `vpnmanager.subscriptions` | `list`, `report`, `get_autoupdate` | да | да | да |
+| `vpnmanager.subscriptions` | `add`, `update`, `remove`, `reorder`, `set_autoupdate` | — | да | — |
+| `vpnmanager.profiles` | `list`, `get` | да | да | да |
+| `vpnmanager.profiles` | `save`, `remove`, `assign` | — | да | — |
+| `vpnmanager.devices` | `list` | да | да | да |
+| `vpnmanager.devices` | `set_mode`, `merge` | — | да | — |
+| `vpnmanager.devices` | `forget` | — | — | да |
+| `vpnmanager.policy` | `status` | да | да | да |
+| `vpnmanager.policy` | `set_udp` | — | да | — |
+| `vpnmanager.maintenance` | `status` | да | да | да |
+| `vpnmanager.maintenance` | `enter`, `exit` | — | да | — |
+| `vpnmanager.audit` | `list` | да | да | да |
+| `vpnmanager.audit` | `undo` | — | да | — |
+| `vpnmanager.logs` | `list`, `tail`, `get_rotation` | да | да | да |
+| `vpnmanager.logs` | `set_rotation` | — | да | — |
+| `vpnmanager.diagnostics` | `report`, `listeners` | да | да | да |
+| `vpnmanager.backup` | `list` | да | да | да |
+| `vpnmanager.backup` | `create`, `restore` | — | — | да |
+| `vpnmanager.operation` | `status` | да | да | да |
+| `vpnmanager.operation` | `cancel` | — | да | — |
+
+Файл `/usr/share/rpcd/acl.d/luci-app-vpnmanager.json` (имя — [П]):
 
 ```json
 {
@@ -305,16 +339,16 @@
       "ubus": {
         "vpnmanager": ["status"],
         "vpnmanager.operation": ["status"],
-        "vpnmanager.servers": ["list", "get", "test"],
-        "vpnmanager.subscriptions": ["list"],
+        "vpnmanager.servers": ["list", "get", "get_strategy"],
+        "vpnmanager.subscriptions": ["list", "report", "get_autoupdate"],
         "vpnmanager.profiles": ["list", "get"],
         "vpnmanager.devices": ["list"],
-        "vpnmanager.dns": ["status"],
         "vpnmanager.policy": ["status"],
-        "vpnmanager.blocklists": ["status", "categories.list", "sources.list", "versions.list", "diff", "stats", "system_exceptions.list", "sets.get"],
         "vpnmanager.maintenance": ["status"],
         "vpnmanager.audit": ["list"],
-        "vpnmanager.diagnostics": ["report", "tail", "conntrack", "listeners"]
+        "vpnmanager.logs": ["list", "tail", "get_rotation"],
+        "vpnmanager.diagnostics": ["report", "listeners"],
+        "vpnmanager.backup": ["list"]
       },
       "uci": ["dhcp", "network", "firewall"]
     }
@@ -325,27 +359,24 @@
       "ubus": {
         "vpnmanager": ["enable", "disable", "reload"],
         "vpnmanager.config": ["set", "apply", "discard", "validate"],
-        "vpnmanager.servers": ["select", "reorder"],
-        "vpnmanager.subscriptions": ["add", "update", "remove", "reorder"],
+        "vpnmanager.servers": ["set_strategy", "set_override"],
+        "vpnmanager.subscriptions": ["add", "update", "remove", "reorder", "set_autoupdate"],
         "vpnmanager.profiles": ["save", "remove", "assign"],
         "vpnmanager.devices": ["set_mode", "merge"],
-        "vpnmanager.dns": ["set_chain", "set_aaaa"],
         "vpnmanager.policy": ["set_udp"],
-        "vpnmanager.blocklists": ["categories.set", "sources.add", "sources.update", "sources.remove", "dry_run", "apply", "whitelist.add", "whitelist.remove", "sets.set"],
-        "vpnmanager.devices": ["set_mode", "merge", "assign", "unassign", "temp_direct", "bulk_preview", "bulk_apply"],
         "vpnmanager.maintenance": ["enter", "exit"],
         "vpnmanager.audit": ["undo"],
+        "vpnmanager.logs": ["set_rotation"],
         "vpnmanager.operation": ["cancel"]
       }
     }
   },
   "luci-app-vpnmanager-admin": {
-    "description": "VPN Manager: backup, restore, очистка",
+    "description": "VPN Manager: backup, restore, удаление записей",
     "write": {
       "ubus": {
         "vpnmanager.backup": ["create", "restore"],
-        "vpnmanager.devices": ["forget"],
-        "vpnmanager.blocklists": ["rollback", "emergency_disable"]
+        "vpnmanager.devices": ["forget"]
       }
     }
   }
@@ -353,11 +384,13 @@
 ```
 
 Правила:
-1. Чтение статуса не даёт права менять.
-2. Backup/restore — отдельная группа (секреты в архиве).
+1. Чтение статуса не даёт права менять. Права read-группы на `logs` включают `list`/`tail`/`get_rotation` и **не** включают `set_rotation`.
+2. Backup/restore и `devices.forget` — отдельная группа (секреты в архиве; удаление записи).
 3. Демон повторно проверяет право на метод по `ubus`-сессии; при отсутствии — `VM_ERR_FORBIDDEN`.
 4. UI не получает `uci`-права на запись: конфигурацию меняет только демон.
 5. `diagnostics` доступна read-группе, но не содержит секретов.
+6. В JSON ACL нет повторяющихся ключей объектов; каждая группа объявляет объект один раз.
+7. `vpnmanager.dns`, `vpnmanager.blocklists`, `vpnmanager.ipv6` в ACL отсутствуют.
 
 ---
 
@@ -379,14 +412,16 @@
 | Поведение rpcd при недоступном демоне | [Т] |
 | Лимит 256 КБ и размер ответов `list` | [Т] |
 | Подписка на события из LuCI JS | [Т] |
-| Разделение прав в реальной сессии LuCI | [Т] T-05 |
-| Синтаксис ACL для новых объектов `blocklists`/`maintenance`/`audit` | [Т] W-11 |
+| Разделение прав в реальной сессии LuCI (включая `logs.set_rotation`) | [Т] T-05 / W-11 |
+| Синтаксис ACL для новых объектов `logs`/`maintenance`/`audit` | [Т] W-11 |
 
 ---
 
-## 9. Идентичность вызывающего субъекта (ТЗ §4, решение №9)
+## 9. Идентичность вызывающего субъекта (ТЗ §4, решение №9; OQ-11 закрыт 24.11.2026)
 
 **Требование:** нельзя доверять имени пользователя, переданному браузером. Механизм должен быть документирован, а не подразумеваться.
+
+**Решение владельца (OQ-11, вариант А):** идентификация выполняется через действующую rpcd-сессию и системный UID; Go daemon самостоятельно проверяет разрешения; JSON-поле `user` не используется для авторизации и должно игнорироваться; дополнительный daemon token **не вводится**. Схема ниже — утверждённая архитектура; фактическая передача identity на целевой прошивке остаётся предметом технической проверки C3-13 (W-11).
 
 | Уровень | Что проверяется | Источник доверия |
 |---|---|---|
@@ -400,5 +435,15 @@
 2. Аудит пишется с `actor` из проверенной сессии, а не из запроса.
 3. Отсутствие сессии/прав → `VM_ERR_FORBIDDEN` без раскрытия деталей.
 4. Ролевой модели в v1 нет (ТЗ §14): доступ только admin/root, разделение — по группам ACL.
-5. Механизм считается **неподтверждённым** до W-11: до его прохождения нельзя утверждать, что API защищён. Это ограничение, а не «поддерживается».
-6. `VM_ERR_UNSUPPORTED` возвращается для `vpnmanager.ipv6.*` и любых методов вне v1.
+5. Механизм считается **неподтверждённым** до W-11 (C3-13): до его прохождения нельзя утверждать, что API защищён, и **функциональную реализацию API не начинать**. Если rpcd не передаёт identity надёжно, молчаливый переход к более слабой схеме запрещён — требуется отдельное решение владельца.
+6. `VM_ERR_UNSUPPORTED` возвращается для `vpnmanager.ipv6.*`, `vpnmanager.dns.*`, `vpnmanager.blocklists.*` и любых методов вне реестра §6.
+
+---
+
+## 10. Ограничения U9, влияющие на контракт
+
+1. **Ручной override и обновление подписки.** Успешное обновление сохраняет override, если выбранный сервер найден в новом наборе по точному совпадению нормализованной конфигурации подключения (№13 §3). Если сервер исчез — `mode` становится `auto`, публикуется `override.reset`. При сохранении `srv_id` перепривязывается к новой записи; публикуется `override.preserved`.
+2. **Автообновление.** Первый плановый запуск — по выбранному интервалу; немедленный первый запрос не утверждён. Ручное обновление доступно всегда.
+3. **Логи.** Ручной очистки и удаления нет; `set_rotation` меняет только порог, не запускает ротацию немедленно.
+4. **Нет собственного здоровья серверов.** API не отдаёт `health`, счётчики отказов, приоритеты, `last_working_server`.
+5. **Нет общего журнала событий.** `diagnostics` не имеет `tail`; аудит настроек — отдельная сущность.

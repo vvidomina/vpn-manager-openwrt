@@ -1,5 +1,7 @@
 # Документ №10. Этап 2: архитектура Go-демона и подсистем
 
+**Актуализация U9 (26.11.2026, ред. 2).** Действующие компоненты: Core/Supervisor, Policy Manager, Xray Manager (генерация Observatory, balancer, `fallbackTag`, ручной override), Subscription Manager, Profile Manager, Device Manager, Transaction Manager, Storage, аудит, API/ACL, LuCI. **DNS Manager, Failover Manager и Blocklists Manager в архитектуре отсутствуют**; их описания в §4 считаются историческими. Общего журнала событий, аналитики и ресурсного мониторинга в v1 нет. Приложение не хранит состояние доступности серверов: источник — Xray Observatory (§5). Диаграмма §8.4 относится к удалённому failover и является исторической; действующее поведение — №20 §3.
+
 Дата: 22.11.2026
 Основание: разрешение владельца на этап 2 (архитектура и контракты). Кодирование, сборка, установка и изменение роутера **не выполнялись и не разрешены**.
 Согласовано с: D-01…D-14 (документ №5), этап 1 (документ №8), план (документ №4).
@@ -64,7 +66,7 @@ graph TD
         PROF[Profile Manager]
         FO[Failover Manager]
         ST[Storage / repositories]
-        J[Journal + Diagnostics + Backup]
+        J[Audit + Diagnostics + Backup]
     end
 
     subgraph SYS["Система OpenWrt"]
@@ -108,17 +110,16 @@ graph TD
 | Transaction Manager | staged apply, rollback, recovery | через модули | журнал транзакций, last-good |
 | Policy Manager | nft, fwmark, ip rule, route | **да** | `inet vpnmanager`, таблица 1000, mark |
 | Xray Manager | генерация конфига, процесс, валидация, проверки | **да** | `/etc/xray/config.json`, процесс Xray |
-| DNS Manager | upstream, перехват 53, форма ответа при блокировке | **да** | dnsmasq-секция проекта, include |
-| Blocklists Manager | источники, категории, версии, diff, whitelist, системные исключения, статистика | нет (решения передаёт владельцам) | `/etc/vpnmanager/blocklists/**` |
+| ~~DNS Manager~~ | **superseded U9** — DNS штатный | — | — |
+| ~~Blocklists Manager~~ | **superseded U9** — подсистема исключена | — | — |
 | ~~IPv6 Guard~~ | ~~детект глобального IPv6, ограничение forward~~ | — | **вне v1** (ТЗ §5); компонент не создаётся |
 | Device Manager | обнаружение, идентичность, назначения | нет (данные) | модель устройств |
 | Subscription Manager | загрузка, разбор, обновление | нет | подписки, серверы |
 | Profile Manager | профили, правила, компиляция | нет | профили, назначения |
-| Failover Manager | health-check, выбор сервера | нет (требование) | метрики здоровья |
-| Blocklists Manager | источники, категории, версии, diff, whitelist, системные исключения, статистика | нет (решения передаёт владельцам) | `/etc/vpnmanager/blocklists/**` |
-| Analytics / Audit | статистика, аудит настроек, аномалии | файлы проекта | история, агрегаты |
+| ~~Failover Manager~~ | **superseded U9** — доступность у Xray | — | W-03, W-05 |
+| Audit | аудит настроек, Undo | файлы проекта | `audit.jsonl` |
 | Storage | атомарная запись, схемы, миграции | файлы проекта | `/etc/vpnmanager` |
-| Journal/Diagnostics/Backup | события, отчёты, копии | файлы проекта | журналы, архивы |
+| Diagnostics/Backup | отчёты, копии | файлы проекта | архивы |
 | ubus API | контракт с UI | нет | объекты и ACL |
 
 Детальные контракты — документ №11; API — №12; данные — №13.
@@ -141,9 +142,9 @@ graph TD
 
 2. **Фактическое состояние системы** (вычисляется, не хранится как истина):
 
-`DISABLED_BY_USER`, `STARTING`, `ACTIVE`, `DEGRADED`, `EMERGENCY_DIRECT`, `WAN_DOWN`, `SWITCHING`, `APPLYING`, `ROLLING_BACK`, `STOPPING`, `UNKNOWN`.
+`DISABLED_BY_USER`, `STARTING`, `ACTIVE`, `DEGRADED`, `EMERGENCY_DIRECT`, `WAN_DOWN`, `FALLBACK_DIRECT`, `FALLBACK_BLOCK`, `APPLYING`, `ROLLING_BACK`, `STOPPING`, `MAINTENANCE`, `UNKNOWN`. Состояние `SWITCHING` удалено вместе с собственным failover (U9): смена стратегии и ручного override — транзакция `APPLYING`.
 
-`DEGRADED` имеет подпричину: `ENGINE_DOWN`, `POLICY_NOT_APPLIED`, `SERVER_UNREACHABLE`, `DNS_FAIL`, `TRAFFIC_UNVERIFIED`, `CONFIG_STALE`, `STALE_SIGNALS`, `RESIDUAL`.
+`DEGRADED` имеет подпричину: `ENGINE_DOWN`, `POLICY_NOT_APPLIED`, `TRAFFIC_UNVERIFIED`, `CONFIG_STALE`, `STALE_SIGNALS`, `RESIDUAL`, `COLD_START`. Подпричины `SERVER_UNREACHABLE` и `DNS_FAIL` удалены в U9: доступность серверов — предмет Observatory и приложением не хранится, DNS — штатный и вне состояний (№18 §6.1, №20 §3.1).
 
 ### 5.2 Шесть признаков (обязательный минимум)
 
@@ -153,10 +154,12 @@ graph TD
 | S2 | Процесс Xray | procd/ubus service, PID+start time | ≤ 5 с |
 | S3 | Конфигурация | хэш файла + `xray -test` + совпадение с генератором | при apply, затем ≤ 60 с |
 | S4 | Сетевая политика | наличие/счётчики цепочек, `ip rule`, route | ≤ 10 с |
-| S5 | Доступность сервера | Failover (проба через выбранный outbound) | ≤ 30 с (D-02) |
+| S5 | Наблюдаемая доступность серверов (необязательный признак) | Xray Observatory через разрешённый локальный интерфейс чтения — OQ-14; собственной пробы нет | ≤ `probeInterval` + таймаут пробы; при отсутствии интерфейса признак не используется |
 | S6 | Реальный трафик | пробный запрос через туннель + счётчики | при apply и ≤ 60 с |
 
 **Правило:** если любой признак старше своего TTL, состояние не может быть `ACTIVE` — выставляется `DEGRADED/STALE_SIGNALS` или `UNKNOWN`. Записанное значение (`mode=vpn`, `alive=1`) признаком не является.
+
+**Ограничение S5.** До решения OQ-14 у приложения нет разрешённого источника данных о доступности серверов: собственная проба удалена вместе с failover. Поэтому S5 не входит в обязательный минимум, не вычисляется «на глаз» и не даёт права показывать доступность серверов или ping в UI. Пять обязательных признаков — S1–S4 и S6.
 
 ### 5.3 Приоритет вычисления
 
@@ -166,10 +169,11 @@ stateDiagram-v2
     DISABLED_BY_USER --> STARTING: user enable
     STARTING --> ACTIVE: S2..S6 ok
     STARTING --> DEGRADED: timeout / engine down
-    ACTIVE --> DEGRADED: server lost / policy lost / traffic fail
-    ACTIVE --> SWITCHING: manual or auto switch
-    SWITCHING --> ACTIVE: проверка трафика ok
-    SWITCHING --> DEGRADED: switch failed, старый сохранён
+    ACTIVE --> DEGRADED: policy lost / traffic fail
+    ACTIVE --> FALLBACK_DIRECT: нет живых outbound, direct_on_failure=true
+    ACTIVE --> FALLBACK_BLOCK: нет живых outbound, direct_on_failure=false
+    FALLBACK_DIRECT --> ACTIVE: Observatory снова даёт outbound
+    FALLBACK_BLOCK --> ACTIVE: Observatory снова даёт outbound
     ACTIVE --> APPLYING: новая конфигурация
     APPLYING --> ACTIVE: trial ok
     APPLYING --> ROLLING_BACK: trial/валидация fail
@@ -192,14 +196,17 @@ stateDiagram-v2
 | 3 | `intent=disabled`, но процесс/правила ещё есть | `STOPPING` (до таймаута), затем `DEGRADED/RESIDUAL` |
 | 4 | WAN/PPPoE без default route | `WAN_DOWN` |
 | 5 | аварийный latch (ручное или автоматическое снятие) | `EMERGENCY_DIRECT` |
-| 6 | идёт переключение сервера | `SWITCHING` |
+| 6 | нет живых outbound среди серверов подписки (по Observatory), `direct_on_failure=true` | `FALLBACK_DIRECT` — только при разрешённом источнике данных (OQ-14) |
+| 6a | то же, `direct_on_failure=false` | `FALLBACK_BLOCK` — то же условие |
 | 7 | процесс отсутствует при `intent=enabled` | `STARTING` (в пределах таймаута) → `DEGRADED/ENGINE_DOWN` |
 | 8 | процесс есть, политики нет | `DEGRADED/POLICY_NOT_APPLIED` (UI обязан показать «трафик идёт напрямую») |
-| 9 | сервер недоступен / DNS fail / трафик не подтверждён | `DEGRADED/<причина>` |
+| 9 | трафик не подтверждён | `DEGRADED/TRAFFIC_UNVERIFIED` |
 | 10 | все признаки свежие и положительные | `ACTIVE` |
 | 11 | признаков недостаточно | `UNKNOWN` |
 
 **Требование:** «молчаливый DIRECT» невозможен: любое состояние, при котором трафик идёт напрямую при `intent=enabled`, обязано иметь ненулевой код предупреждения в статусе и событие в журнале.
+
+**Уточнение U9-H.** Формулировка относится к наблюдаемому поведению: при `FALLBACK_BLOCK` отсутствие DIRECT обеспечивается конфигурацией Xray (№18 §7.3.1), а не собственной блокировкой демона. Признак S5 в обязательный минимум не входит до решения OQ-14.
 
 ---
 
@@ -363,15 +370,16 @@ sequenceDiagram
     end
 ```
 
-### 8.4 Сервер недоступен и восстановился
+### 8.4 Сервер недоступен и восстановился — **историческая (U9: см. №20 §3)**
 
 ```mermaid
 sequenceDiagram
     participant FO as Failover
     participant C as Core
     participant XM as Xray Mgr
-    FO->>FO: 2 независимых fail (D-02)
-    FO->>C: server_down(current)
+    FO->>FO: 2 fail → DEGRADED (без переключения)
+    FO->>FO: 3-й fail → сервер недоступен (D-02/C3-15)
+    FO->>C: server_unavailable(current)
     C->>C: state=DEGRADED/SERVER_UNREACHABLE
     C->>FO: выбрать следующий по приоритету
     FO-->>C: candidate
@@ -380,7 +388,7 @@ sequenceDiagram
     Note over FO: прежний сервер проверяется реже;<br/>возврат — по D-03, без сброса предпочтений
 ```
 
-### 8.5 Ручное переключение
+### 8.5 Ручное переключение — **уточнено U9: override, см. №18 §7.4**
 
 ```mermaid
 sequenceDiagram
@@ -437,7 +445,7 @@ sequenceDiagram
 | `/etc/config/firewall` | **никто** (только чтение) | preflight, Diagnostics | не меняется (D-08 — только отчёт) |
 | `/etc/vpnmanager/**` | Storage | все модули | tmp+rename+fsync, prev |
 | `/tmp/vpnmanager/**` | Core/модули | Diagnostics | не переживает ребут |
-| Flash-журнал | Journal | Diagnostics, UI | ротация 256 КБ + 1 |
+| ~~Flash-журнал~~ | **superseded U9** | — | общего журнала событий нет |
 | Backup-архив | Backup | пользователь | создаётся по запросу |
 | ubus-объекты `vpnmanager.*` | ubus API | LuCI | регистрация при старте |
 | `/etc/init.d/vpnmanager` | пакет (не демон) | procd | вне транзакций |
@@ -451,21 +459,21 @@ sequenceDiagram
 | Отказ | Обнаружение | Немедленное действие | Состояние | Восстановление | Риск для пользователя |
 |---|---|---|---|---|---|
 | Xray не стартует | exit code / нет слушателей | не поднимать перехват | `DEGRADED/ENGINE_DOWN` | backoff, затем EMERGENCY | интернет есть, VPN нет |
-| Xray упал после старта | procd/ubus + PID | снять/не поднимать правила | `DEGRADED/ENGINE_DOWN` | рестарт по backoff | краткий DIRECT |
+| Xray упал после старта | procd/ubus + PID | правила сохраняются; listener мёртв | `DEGRADED/ENGINE_DOWN` | рестарт по backoff | краткий сбой перехвата; при `direct_on_failure=false` DIRECT не включается |
 | Ошибка конфига | `xray -test` | отменить apply | `config=Invalid` | last-good | нет |
-| Нет исходящего соединения | preflight/trial | откат | `DEGRADED/SERVER_UNREACHABLE` | следующий сервер | нет/краткий |
+| Нет исходящего соединения | preflight/trial | откат | `DEGRADED/TRAFFIC_UNVERIFIED` | last-good; выбор сервера — Xray, не приложение | нет/краткий |
 | Ошибка nft | `nft -c`/exit | не применять | `DEGRADED/POLICY_NOT_APPLIED` | last-good | возможен DIRECT с предупреждением |
 | Ошибка ip rule/route | exit code | откат политики | `DEGRADED` | last-good | нет мёртвого порта |
 | WAN/PPPoE down | netifd/ubus | не считать сервер виновным | `WAN_DOWN` | ждать WAN + проверка | интернет отсутствует по WAN |
-| DNS не отвечает | проба резолвера | переключить цепочку | `DEGRADED/DNS_FAIL` | fallback по ТЗ §9 | сайты не открываются |
-| dnsmasq упал | procd/ubus | перезапуск | `DEGRADED/DNS_FAIL` | восстановление конфига | краткий сбой DNS |
+| DNS не отвечает | внешняя проверка (read-only) | не вмешиваться: DNS вне Xray и вне состояний VPN | состояние сервиса не меняется; при неподтверждённом трафике — `DEGRADED` | штатный DNS OpenWrt или действие пользователя | сайты не открываются |
+| `dnsmasq` упал | procd/ubus | вне области приложения: приложение не управляет DNS | состояние VPN не меняется | штатный OpenWrt | сайты не открываются |
 | Падение демона | procd | перезапуск демона | `UNKNOWN` → пересчёт | recovery по журналу | состояние может мигать |
 | Перезагрузка во время apply | журнал фаз | отбросить незавершённую | `ROLLING_BACK` → `ACTIVE/EMERGENCY` | last-good | краткий DIRECT |
 | Нет места на Flash | statfs при prepare | запретить apply/backup | `DEGRADED/CONFIG_STALE` | очистка журнала/архивов | нет |
 | OOM | ядро/procd | перезапуск, снижение детализации логов | `UNKNOWN` | пересчёт | краткий сбой |
 | Появился глобальный IPv6 | — (в v1 не отслеживается) | никаких действий | состояние не меняется | — | принятый риск R3-01: клиент может выйти по IPv6 |
 | Конфликт чужого правила | preflight | только отчёт | `DEGRADED` | решение пользователя (D-08) | зависит от конфликта |
-| Массовые ложные fail | сравнение с WAN | не переключать всё | `DEGRADED` | проверка независимости проб | временный DIRECT |
+| Массовые ложные «серверы недоступны» | Observatory (только при разрешённом источнике, OQ-14) | не вмешиваться: выбор делает Xray | `FALLBACK_*` — при разрешённом источнике | следующая пауза `probeInterval` | временный DIRECT либо `blackhole` по настройке |
 | Повреждён geo-файл | проверка размера/хэша | не применять профиль | `config=Invalid` | восстановление из пакета | нет |
 | Несовместимая версия backup | restore-валидация | отказать | — | ручной разбор | нет |
 
