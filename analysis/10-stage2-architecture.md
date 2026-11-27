@@ -154,7 +154,7 @@ graph TD
 | S2 | Процесс Xray | procd/ubus service, PID+start time | ≤ 5 с |
 | S3 | Конфигурация | хэш файла + `xray -test` + совпадение с генератором | при apply, затем ≤ 60 с |
 | S4 | Сетевая политика | наличие/счётчики цепочек, `ip rule`, route | ≤ 10 с |
-| S5 | Наблюдаемая доступность серверов (необязательный признак) | Xray Observatory через gRPC `ObservatoryService.GetOutboundStatus` на `127.0.0.1` (OQ-14, вариант B); собственной пробы нет | ≤ `probeInterval` + таймаут пробы; при ошибке API признак не используется |
+| S5 | Наблюдаемая доступность серверов (необязательный признак) | Xray Observatory через gRPC `ObservatoryService.GetOutboundStatus` на `127.0.0.1` (OQ-14, вариант B); собственной пробы нет | по формуле №20 §7.2 (`probeInterval` + 2 × `max_probe_time` — concurrent; `N × (probeInterval + max_probe_time)` — sequential); при ошибке API или отсутствии свежих записей признак не используется |
 | S6 | Реальный трафик | пробный запрос через туннель + счётчики | при apply и ≤ 60 с |
 
 **Правило:** если любой признак старше своего TTL, состояние не может быть `ACTIVE` — выставляется `DEGRADED/STALE_SIGNALS` или `UNKNOWN`. Записанное значение (`mode=vpn`, `alive=1`) признаком не является.
