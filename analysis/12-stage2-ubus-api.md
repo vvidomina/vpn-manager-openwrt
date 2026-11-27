@@ -237,9 +237,19 @@
 
 Правило: `ACTIVE` невозможен при `fresh:false` у любого обязательного признака. Отдельного признака «здоровье сервера» нет: доступность сообщает Observatory.
 
-**Наблюдаемость (OQ-14).** Поля `servers` и `fallback` в `status` не публикуются, пока владелец не выберет разрешённый источник данных (№20 §3.1, REQ-168). До этого `status` содержит только S1–S4 и S6, а `service.fallback_entered`/`service.fallback_left` не отправляются. Признак S5 в примере не показан по той же причине.
+**Наблюдаемость (OQ-14, вариант B — утверждён 27.11.2026).** Источник данных об outbound — локальный gRPC `ObservatoryService.GetOutboundStatus` (listener только на `127.0.0.1`, в `api.services` только `ObservatoryService`; `metrics`/`/debug/vars` не используются). `status` получает два разных по природе блока:
 
-**Что именно не видно.** `status` не содержит и не может содержать две разные вещи: (1) состояние отдельных outbound (доступность, delay) и (2) факт применения `fallbackTag` — это внутреннее состояние Xray, а не поле сервиса (№20 §3.1, уровни 2–3). Ошибка процесса Xray (S2) и состояние сервиса по подтверждённым признакам (S1–S4, S6) от этого не зависят и публикуются.
+| Поле | Природа | Содержимое |
+|---|---|---|
+| `observability` | служебное | `{state: ok|no_data|stale|error, last_ok_ts, error_code}` |
+| `servers[]` | **наблюдение** | `{server_id, outbound_tag, alive, delay_ms, last_seen_ts, last_try_ts, fresh}` |
+| `fallback` | **производное** | `{active, mode: direct|block, source: "derived", basis: "no_alive_outbound"}` |
+
+`servers[]` публикуется только из ответа API. `fallback` вычисляется по отсутствию живых outbound подписки и всегда помечается `source: "derived"`: фактический выбор балансировщика и факт применения `fallbackTag` Xray не сообщает. События `service.fallback_entered`/`service.fallback_left` допускаются только как производные переходы с той же пометкой.
+
+При `observability.state != ok` поля `servers`/`fallback` не заполняются или помечаются несвежими; подстановка `healthy`/`unavailable` запрещена. Ошибка API — `observability=error`, а не отказ Xray и не отказ VPN (№20 §3.1, §7.2, REQ-168).
+
+**Что именно не видно.** `status` не содержит и не может содержать две разные вещи: (1) выбранный для потока outbound и состояние балансировщика и (2) факт применения `fallbackTag` — это внутреннее состояние Xray, а не поле сервиса (№20 §3.1, уровни 2–4). Доступность отдельных outbound, наоборот, видна через API и публикуется как наблюдение. Ошибка процесса Xray (S2) и состояние сервиса по подтверждённым признакам (S1–S4, S6) от этого не зависят и публикуются раздельно.
 
 ### 4.2 `vpnmanager.ipv6.status` — зарезервировано: пример задела v2 (в v1 не возвращается)
 
@@ -284,7 +294,7 @@
 | `servers` | изменение состава серверов, стратегии или override | strategy, mode, changed_ids |
 | `devices` | online/offline/назначение | mac, mode |
 | `operation` | прогресс длительной операции | op_id, phase, progress |
-| `service.fallback_entered` / `service.fallback_left` | вход/выход из `FALLBACK_*` | `FALLBACK_DIRECT`/`FALLBACK_BLOCK`; **не публикуются до решения OQ-14** |
+| `service.fallback_entered` / `service.fallback_left` | вход/выход из `FALLBACK_*` | `FALLBACK_DIRECT`/`FALLBACK_BLOCK`; публикуются только как производные переходы (`source=derived`) при `observability.state=ok` (OQ-14 B) |
 | `subscription.updated` / `subscription.update_failed` | результат обновления | accepted, rejected |
 | `strategy.changed` | смена стратегии | from, to |
 | `override.set` / `override.preserved` / `override.reset` | ручной выбор | server_id, reason |
