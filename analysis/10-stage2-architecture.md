@@ -27,7 +27,7 @@
 | A4 | Намерение пользователя — отдельная сущность | D-14 | `intent=disabled` не равно «ошибка» |
 | A5 | Fail-safe по умолчанию: нет трафика в неработающий порт | B-05; ТЗ §13 | Порядок «порт готов → правила → проверка» |
 | A6 | Нет сетевого порта демона | D-05 | Только ubus/rpcd; ACL + проверка в демоне |
-| A7 | Единственный писатель DNS-политики | B-03/B-04; ТЗ §9 | DNS Manager владеет upstream и перехватом 53 |
+| A7 | DNS — штатный механизм OpenWrt; приложение DNS-политикой не владеет | B-03/B-04; ТЗ §9; U9 (26.11.2026) | DNS Manager не создаётся: нет собственного upstream, перехвата 53, include-файлов dnsmasq и DNS-состояний; DNS вне `decide()` и вне Xray |
 | A8 | Секреты не покидают демон | ТЗ §17.1 | Маскирование в логах/API/диагностике; файлы 0600 |
 | A9 | IPv4-only по внешней маршрутизации; IPv6-подсистема не изменяется; IPv6 Guard и детект глобального IPv6 **вне v1** | D-01 + решение №11 (ТЗ §5) | Ни одной IPv6-цепочки, ни одного IPv6-правила; риск bypass принят (№21 R3-01) |
 | A10 | Идемпотентность и сериализация операций | ТЗ §17.3 | Очередь операций, один mutex на изменение сети |
@@ -45,7 +45,7 @@ graph TD
         V2[Серверы и профили]
         V3[Подписки]
         V4[Устройства]
-        V5[DNS / UDP]
+        V5[Маршрутизация / UDP]
         V6[Диагностика / backup]
     end
 
@@ -59,12 +59,9 @@ graph TD
         TX[Transaction Manager<br/>staged apply / rollback / recovery]
         POL[Policy Manager]
         XM[Xray Manager]
-        DNS[DNS Manager]
-        BL[Blocklists Manager]
         DEV[Device Manager]
         SUB[Subscription Manager]
         PROF[Profile Manager]
-        FO[Failover Manager]
         ST[Storage / repositories]
         J[Audit + Diagnostics + Backup]
     end
@@ -73,31 +70,25 @@ graph TD
         NFT[(nftables: inet vpnmanager)]
         RULE[(ip rule / table 1000)]
         XR[[xray process]]
-        DM[[dnsmasq]]
-        UCI[(UCI: dhcp, network)]
         PROC[(/proc, netlink, ubus system)]
         FS[(/etc/vpnmanager, /tmp/vpnmanager)]
     end
 
     V1 & V2 & V3 & V4 & V5 & V6 --> ACL --> OBJ --> CORE
     CORE --> TX
-    TX --> POL & XM & DNS
-    CORE --> DEV & SUB & PROF & FO
+    TX --> POL & XM
+    CORE --> DEV & SUB & PROF
     CORE --> ST & J
     POL --> NFT & RULE
     XM --> XR
-    DNS --> DM & UCI
-    CORE --> BL
-    BL -.->|только решения| POL & DNS
     DEV --> PROC
     ST --> FS
     J --> FS
-    FO --> XM
 ```
 
 **Потоки:**
 - UI → rpcd (проверка ACL) → ubus-метод → Core → очередь операций → модуль → системный адаптер.
-- Мониторинг (Failover) работает в отдельной горутине, но **не меняет** политику напрямую: публикует событие/требование, изменение выполняет Transaction Manager под тем же lock.
+- Собственного мониторинга у приложения нет (U9): наблюдение за outbound выполняет штатный Xray `observatory`, выбор кандидата — `routing.balancers` с `fallbackTag`. Фоновой горутины проверок и собственного механизма переключения не существует; приложение лишь публикует полученные через gRPC `ObservatoryService` наблюдения.
 - События (`vpnmanager.event`) рассылаются всем подписчикам ubus; UI не опрашивает чаще, чем раз в 2 с.
 
 ---
@@ -318,14 +309,13 @@ sequenceDiagram
 sequenceDiagram
     participant U as UI
     participant C as Core
-    participant FO as Failover
     participant XM as Xray Mgr
     participant PM as Policy Mgr
     U->>C: vpn.enable
     C->>C: intent=enabled (Saved)
-    C->>FO: выбрать сервер по D-13
-    FO-->>C: server + profile
-    C->>XM: start(server, profile)
+    C->>XM: build config (balancer, стратегия или override, fallbackTag)
+    XM-->>C: artifact — outbound выбирает Xray, не приложение
+    C->>XM: start(artifact)
     XM-->>C: listeners ok
     C->>PM: apply policy
     C->>XM: verify traffic
@@ -358,12 +348,11 @@ sequenceDiagram
     participant SUP as Supervisor
     participant C as Core
     participant PM as Policy Mgr
-    participant FO as Failover
     SUP->>C: process exited (unexpected)
     C->>C: state=DEGRADED/ENGINE_DOWN
     C->>PM: правила сохраняются; listener мёртв (fail-closed)
-    C->>FO: проверить WAN и сервер
-    alt WAN ok и сервер ok
+    C->>C: проверить WAN; доступность outbound — из Observatory
+    alt WAN ok (доступность outbound — предмет Xray)
         C->>C: respawn 3600 5 5 (procd)
         C->>PM: apply policy
         C->>C: verify traffic → ACTIVE
@@ -373,6 +362,8 @@ sequenceDiagram
 ```
 
 ### 8.4 Сервер недоступен и восстановился — **историческая (U9: см. №20 §3)**
+
+> **Устарело — superseded U9; не является действующим требованием.** Диаграмма описывает удалённый собственный Failover Manager (пороги 2/3 отказа, приоритеты, `SWITCHING`, `DEGRADED/SERVER_UNREACHABLE`) и сохранена только как история. Действующее поведение — №18 §7.1–§7.3 и №20 §3: наблюдение и выбор выполняет Xray, приложение переключение не инициирует и состояние доступности серверов не хранит.
 
 ```mermaid
 sequenceDiagram
@@ -391,6 +382,8 @@ sequenceDiagram
 ```
 
 ### 8.5 Ручное переключение — **уточнено U9: override, см. №18 §7.4**
+
+> **Механика на диаграмме устарела — superseded U9; не является действующим требованием.** Метода `servers.select` и собственной проверки «check now» в U9 нет: ручной выбор — override, реализуемый сужением `selector` балансировщика (№18 §7.4.1), выбор остаётся за Xray. Диаграмма сохранена как история и не описывает API, ACL или поведение v1.
 
 ```mermaid
 sequenceDiagram
@@ -435,14 +428,14 @@ sequenceDiagram
 
 | Ресурс | Единственный писатель | Кто читает | Транзакция / откат |
 |---|---|---|---|
-| `table inet vpnmanager` (nft) | Policy Manager | Diagnostics (Blocklists — только решения) | `nft -c` → apply → снимок prev |
+| `table inet vpnmanager` (nft) | Policy Manager | Diagnostics | `nft -c` → apply → снимок prev |
 | ~~Цепочка `ipv6_guard`~~ | **вне v1** — цепочка не создаётся (решение №11) | — | — |
 | `ip rule` (fwmark) | Policy Manager | Diagnostics | снимок prev, восстановление |
 | Таблица маршрутизации 1000 | Policy Manager | Diagnostics | снимок prev |
 | Процесс Xray | Xray Manager | Supervisor, Diagnostics | stop/start, last-good конфиг |
 | `/etc/xray/config.json` | Xray Manager | Xray | prev-копия, атомарная замена |
-| `/etc/config/dhcp` (секция dnsmasq) | DNS Manager (только свои опции) | dnsmasq, LuCI | снимок опций, восстановление |
-| Include DNS-политики `/etc/vpnmanager/dnsmasq.d/*.conf` | DNS Manager | dnsmasq | файл + reload |
+| `/etc/config/dhcp` (секция dnsmasq) | **никто** — DNS штатный (U9); прежний владелец DNS Manager упразднён | dnsmasq, LuCI | не меняется |
+| ~~Include DNS-политики `/etc/vpnmanager/dnsmasq.d/*.conf`~~ | **не создаётся** (U9) | — | — |
 | `/etc/config/network` | **никто** (только чтение) | Diagnostics | не меняется |
 | `/etc/config/firewall` | **никто** (только чтение) | preflight, Diagnostics | не меняется (D-08 — только отчёт) |
 | `/etc/vpnmanager/**` | Storage | все модули | tmp+rename+fsync, prev |
@@ -530,18 +523,21 @@ sequenceDiagram
 | Номер таблицы и fwmark | предлагается 1000 / `0x1000`, проверить занятость | №14, preflight |
 | Приоритет nft-цепочек | только prerouting −150; forward −5 не применяется (нет Guard) | №14, W-02 |
 | Длительность trial и бюджет отката | требует теста (W-04) | №14 |
-| Транспорт DoH (свой vs `https-dns-proxy`) | предлагается свой в Go | №14 |
+| ~~Транспорт DoH (свой vs `https-dns-proxy`)~~ | **superseded U9**: DNS-подсистемы нет; пересмотр DNS — неблокирующее напоминание (№22 §4) | — |
 | Поведение при offload | требует теста (W-02) | №14 |
 | Точные лимиты сущностей | предлагается, проверить по RAM | №13 |
-| Blocklists, приоритеты, Maintenance | **добавлены** 22.11.2026 | №18, №19, №20 |
+| Приоритеты, Maintenance | **добавлены** 22.11.2026 | №18, №20 |
+| ~~Blocklists~~ | **superseded U9 (26.11.2026)**: подсистема исключена, №19 — исторический документ | №22 §5 |
 
 ## 15. Что добавлено при актуализации по ТЗ v1.0
 
+> **Исторический раздел.** Перечисленные ниже добавления относились к редакции ТЗ v1.0 и в U9 частично отменены: Blocklists, DNS-подсистема, собственный failover и статистика удалены. Действующая архитектура — №17 §16, №18, №20, №22.
+
 | Добавление | Документ |
 |---|---|
-| Подсистема Blocklists (источники, версии, diff, rollback, whitelist, статистика) | №19 |
-| Формальная модель приоритетов (P0–P9, D0–D5, Always DIRECT, UDP) | №18 |
-| Состояния `PROXY_FALLBACK_DIRECT`, `MAINTENANCE`, DNS, Blocklists | №20 |
-| Статистика (48 ч/30 дней), аудит настроек, Undo, аномалии | №13 §8–§10, №11 §14 |
+| ~~Подсистема Blocklists (источники, версии, diff, rollback, whitelist, статистика)~~ — **superseded U9** | №19 (исторический) |
+| Формальная модель приоритетов (P0–P9, D0–D5) — **заменена моделью L1–L4 в U9** | №18 |
+| Состояния `PROXY_FALLBACK_DIRECT`, `MAINTENANCE`, DNS, Blocklists — **в U9 заменены (`FALLBACK_*`) или удалены** | №20 |
+| ~~Статистика (48 ч/30 дней)~~, аудит настроек, Undo, аномалии | №13 §8–§10 |
 | Группы устройств, массовые операции, временные overlay | №13 §4.4, №18 §4 |
 | Требования и объём v1 | №17, №22 |

@@ -14,7 +14,7 @@
 
 **Ответственность и границы.** Жизненный цикл демона, регистрация модулей, очередь операций изменения, единый mutex сети, внутренняя шина событий, вычисление состояния VPN по шести признакам (D-14). Не выполняет системных изменений сам — только координирует.
 
-**Входы.** ubus-вызовы от API; события модулей (процесс, здоровье сервера, политика, WAN); сигналы procd.
+**Входы.** ubus-вызовы от API; события модулей (процесс, наблюдения Observatory, политика, WAN); сигналы procd.
 **Выходы.** Команды модулям; публичные события `state.changed`, `op.progress`; runtime-снимок для статуса.
 
 **Публичные методы и события.**
@@ -47,8 +47,9 @@
 **Входы.** ubus-запросы LuCI/CLI; rpcd-сессия и ACL.
 **Выходы.** JSON-ответы по схемам (§12); события `vpnmanager.event`.
 
-**Публичные методы и события.** Объекты: `vpnmanager` (status/enable/disable), `vpnmanager.config`, `vpnmanager.servers`, `vpnmanager.subscriptions`, `vpnmanager.profiles`, `vpnmanager.devices`, `vpnmanager.dns`, `vpnmanager.policy`, ~~`vpnmanager.ipv6`~~ (reserved, v2), `vpnmanager.diagnostics`, `vpnmanager.backup`, `vpnmanager.operation`. Полный перечень — документ №12 §3.
-События: `state`, `config`, `servers`, `devices`, `dns`, `operation`, `log` (`ipv6` — reserved, v2).
+**Публичные методы и события.** Объекты: `vpnmanager` (status/enable/disable), `vpnmanager.config`, `vpnmanager.servers`, `vpnmanager.subscriptions`, `vpnmanager.profiles`, `vpnmanager.devices`, `vpnmanager.policy`, `vpnmanager.maintenance`, `vpnmanager.audit`, `vpnmanager.logs`, `vpnmanager.diagnostics`, `vpnmanager.backup`, `vpnmanager.operation`. Полный перечень — документ №12 §2 и §6 (единый реестр).
+События: `state`, `intent`, `config`, `servers`, `devices`, `operation`, `service.fallback_entered`/`service.fallback_left`, `subscription.*`, `strategy.changed`, `override.*`, `logrotate.*` (№12 §5).
+**Не регистрируются и не публикуются (U9):** `vpnmanager.dns`, `vpnmanager.blocklists` и события `dns.*`, `blocklists.*`, `log`; `vpnmanager.ipv6` зарезервирован для v2.
 
 **Состояния и ошибки.** Коды `VM_OK`, `VM_ERR_INVALID_ARGUMENT`, `VM_ERR_NOT_FOUND`, `VM_ERR_CONFLICT`, `VM_ERR_BUSY`, `VM_ERR_FORBIDDEN`, `VM_ERR_UNSUPPORTED`, `VM_ERR_TIMEOUT`, `VM_ERR_INTERNAL`, `VM_ERR_STORAGE`, `VM_ERR_VALIDATION`, `VM_ERR_ROLLED_BACK`.
 
@@ -120,7 +121,7 @@ type Policy interface {
 
 **Ответственность и границы.** Генерация конфига Xray, валидация `xray -test`, запуск/остановка/перезапуск процесса, проверка слушателей, preflight outbound, trial-проверка реального трафика, переключение сервера без «мёртвого порта». Не владеет nft/route и не решает, когда включать VPN (это Core/Transaction).
 
-**Входы.** Сервер + профиль + режим (proxy/direct), политика UDP, порт TPROXY, состояние DNS (Guard — вне v1).
+**Входы.** Сервер + профиль, политика UDP, порт TPROXY, настройки стратегии/override и `direct_on_failure`. DNS-состояния нет: DNS штатный и в конфигурацию Xray не входит (U9); Guard — вне v1.
 **Выходы.** Файл конфига, PID/состояние процесса, результат валидации и проб, событие `xray.*`.
 
 **Публичные методы и события.**
@@ -139,9 +140,9 @@ type Xray interface {
 
 **Состояния и ошибки.** `absent`, `starting`, `running`, `listening`, `verifying`, `stopping`, `crashed`. Ошибки: `VM_ERR_XRAY_CONFIG`, `VM_ERR_XRAY_START`, `VM_ERR_XRAY_LISTEN`, `VM_ERR_XRAY_PROBE`, `VM_ERR_XRAY_TRAFFIC`.
 
-**Взаимодействие.** Transaction Manager — этапы; Policy Manager — порт/перехват; Failover — пробы; DNS — Remote DNS; Subscription/Profile — данные.
+**Взаимодействие.** Transaction Manager — этапы; Policy Manager — порт/перехват; Subscription/Profile — данные. Наблюдение за outbound и выбор кандидата — штатные `observatory` и `routing.balancers` самого Xray; собственного Failover-компонента, собственных проб и собственного переключения у приложения нет (U9).
 
-**Владение.** `/etc/xray/config.json` (единственный писатель), процесс Xray, временные артефакты в `/tmp/vpnmanager`. Слушатели: TPROXY на `br-lan`/loopback, health/probe — только loopback (S1-09).
+**Владение.** `/etc/xray/config.json` (единственный писатель), процесс Xray (запуск — только через единственный launcher с `flock`, §5 ниже), временные артефакты в `/tmp/vpnmanager`. Слушатели: TPROXY на `br-lan`; gRPC `api.listen` — только `127.0.0.1` (S1-09); собственных проб и собственного health-listener приложение не создаёт (U9).
 
 **Безопасность.** Секреты (UUID/ключи) не попадают в логи и API; файл 0600; конфиг не содержит лишних inbound на `0.0.0.0`; проверка, что сгенерированный конфиг соответствует версии генератора (хэш).
 
