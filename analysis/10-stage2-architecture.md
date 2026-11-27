@@ -170,10 +170,11 @@ stateDiagram-v2
     STARTING --> ACTIVE: S2..S6 ok
     STARTING --> DEGRADED: timeout / engine down
     ACTIVE --> DEGRADED: policy lost / traffic fail
-    ACTIVE --> FALLBACK_DIRECT: нет живых outbound, direct_on_failure=true
-    ACTIVE --> FALLBACK_BLOCK: нет живых outbound, direct_on_failure=false
-    FALLBACK_DIRECT --> ACTIVE: Observatory снова даёт outbound
-    FALLBACK_BLOCK --> ACTIVE: Observatory снова даёт outbound
+    %% пунктир — модельный переход; до OQ-14 приложением не наблюдается (№20 §3.1)
+    ACTIVE -.-> FALLBACK_DIRECT: нет живых outbound, direct_on_failure=true
+    ACTIVE -.-> FALLBACK_BLOCK: нет живых outbound, direct_on_failure=false
+    FALLBACK_DIRECT -.-> ACTIVE: Observatory снова даёт outbound
+    FALLBACK_BLOCK -.-> ACTIVE: Observatory снова даёт outbound
     ACTIVE --> APPLYING: новая конфигурация
     APPLYING --> ACTIVE: trial ok
     APPLYING --> ROLLING_BACK: trial/валидация fail
@@ -196,8 +197,8 @@ stateDiagram-v2
 | 3 | `intent=disabled`, но процесс/правила ещё есть | `STOPPING` (до таймаута), затем `DEGRADED/RESIDUAL` |
 | 4 | WAN/PPPoE без default route | `WAN_DOWN` |
 | 5 | аварийный latch (ручное или автоматическое снятие) | `EMERGENCY_DIRECT` |
-| 6 | нет живых outbound среди серверов подписки (по Observatory), `direct_on_failure=true` | `FALLBACK_DIRECT` — только при разрешённом источнике данных (OQ-14) |
-| 6a | то же, `direct_on_failure=false` | `FALLBACK_BLOCK` — то же условие |
+| 6 | нет живых outbound среди серверов подписки (по Observatory), `direct_on_failure=true` | `FALLBACK_DIRECT` — модельное состояние; вычисляется только при разрешённом источнике данных (OQ-14) |
+| 6a | то же, `direct_on_failure=false` | `FALLBACK_BLOCK` — то же условие; модельное состояние, не наблюдаемое приложением |
 | 7 | процесс отсутствует при `intent=enabled` | `STARTING` (в пределах таймаута) → `DEGRADED/ENGINE_DOWN` |
 | 8 | процесс есть, политики нет | `DEGRADED/POLICY_NOT_APPLIED` (UI обязан показать «трафик идёт напрямую») |
 | 9 | трафик не подтверждён | `DEGRADED/TRAFFIC_UNVERIFIED` |
