@@ -112,6 +112,8 @@ fresh  ⇔  now − last_try_time ≤ TTL
 TTL    =  T_cycle + grace
 T_cycle = probeInterval + max_probe_time                      (enableConcurrency: true)
 T_cycle = N × (probeInterval + max_probe_time)                (enableConcurrency: false)
+
+> **Историческая точность (U9-H3, отчёт №41).** Формула concurrent-режима в этой редакции (`probeInterval + max_probe_time`) была нижней оценкой, а не верхней. Действующая формула — `T_cycle ≤ probeInterval + 2 × max_probe_time`; для sequential — `T_cycle ≤ N × (probeInterval + max_probe_time)`, где `N` — число outbound после префиксного сопоставления `subjectSelector`. Документ сохраняется как история U9-H2; нормативная формула — №20 §7.2.
 ```
 
 - `N` — число outbound в `subjectSelector`;
