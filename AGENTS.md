@@ -129,7 +129,7 @@ VPN-политика приложения применяется к клиент
 
 `fallbackTag` должен применяться только к трафику VPN-балансировщика. Не используй безусловное правило на весь трафик, которое может перехватить Always DIRECT, UDP DIRECT, DNS или собственный трафик роутера.
 
-Наблюдаемость состояния outbound (OQ-14, вариант B): только локальный gRPC `ObservatoryService.GetOutboundStatus` на `127.0.0.1`, в `api.services` только `ObservatoryService`. Не включай `metrics`, `/debug/vars`, `StatsService`, `LoggerService`, `HandlerService`, `RoutingService` и не создавай HTTP-интерфейс приложения. API сообщает результаты наблюдения, но не выбранный outbound и не факт применения `fallbackTag`: такое состояние публикуй только как производное с явной пометкой.
+Наблюдаемость состояния outbound (OQ-14, вариант B): только локальный gRPC `ObservatoryService.GetOutboundStatus` на `127.0.0.1`, в `api.services` только `ObservatoryService`. Ошибка создания listener — отказ запуска Xray (`ENGINE_DOWN`), а не `api_error`; loopback не является аутентификацией, локальный доступ и UID/GID фиксируются проверкой, а не предполагаются. Не включай `metrics`, `/debug/vars`, `StatsService`, `LoggerService`, `HandlerService`, `RoutingService` и не создавай HTTP-интерфейс приложения. API сообщает результаты наблюдения, но не выбранный outbound и не факт применения `fallbackTag`: такое состояние публикуй только как производное с явной пометкой.
 
 - `direct_on_failure` глобален для соответствующей VPN-конфигурации/подписки, не per-device; по умолчанию `true`.
 - При `true` fallback для VPN-трафика — штатный DIRECT.

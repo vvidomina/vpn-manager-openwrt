@@ -85,7 +85,7 @@
 
 `FALLBACK_DIRECT`/`FALLBACK_BLOCK` — фактическое поведение Xray, а не измеряемое приложением состояние. В U9 нет штатного канала, через который демон узнаёт «все серверы недоступны»: собственная проба удалена вместе с failover, а `fallbackTag` — внутренняя логика Xray.
 
-**Четыре уровня, которые нельзя смешивать:**
+**Пять уровней, которые нельзя смешивать:**
 
 | Уровень | Что это | Кто определяет | Доступно приложению |
 |---|---|---|---|
@@ -101,7 +101,7 @@
 
 | Вариант | Что даёт | Ограничение |
 |---|---|---|
-| gRPC `ObservatoryService.GetOutboundStatus` | статус каждого outbound: `alive`, `delay`, `last_error_reason` | требует включить Xray API и локальный inbound на loopback |
+| gRPC `ObservatoryService.GetOutboundStatus` | статус каждого outbound: `alive`, `delay`, `last_error_reason` | требует включить Xray API с `api.listen` на loopback; отдельный inbound не нужен (уточнено в U9-H2) |
 | `metrics`-слушатель, `/debug/vars` | тот же статус в секции `observatory` | требует локального HTTP-слушателя |
 | Собственная проба демона | не требует интерфейса Xray | противоречит U9: возврат собственного health-механизма и лишний трафик |
 
@@ -260,9 +260,17 @@ stateDiagram-v2
 | `no_candidate` | данные есть, но ни один outbound подписки не `alive` | «Нет живых серверов» (наблюдение) |
 | `fallback_expected` | `no_candidate` → ожидается срабатывание `fallbackTag` | «VPN-трафик, вероятно, идёт DIRECT/заблокирован» с пометкой «производное» |
 | `stale` | `last_try_time` старше `probeInterval` + таймаут пробы + запас | «Данные устарели» + время |
-| `api_error` | ошибка gRPC: `connection refused`, `Unimplemented`, таймаут | «Нет связи с интерфейсом наблюдаемости»; процесс Xray показывается отдельно |
+| `api_error` | ошибка вызова gRPC при работающем Xray: `Unimplemented` (сервис не зарегистрирован), `DeadlineExceeded`/таймаут запроса | «Нет связи с интерфейсом наблюдаемости»; процесс Xray показывается отдельно |
 
 Состояние `fallback_expected` не означает, что Xray действительно применил `fallbackTag`: выбранный outbound API не сообщает. Собственная проба и собственный failover для этих состояний не создаются.
+
+**Три разных отказа (U9-H2, отчёт №39).** Их нельзя смешивать:
+
+1. **Ошибка создания listener при старте Xray.** `net.ResolveTCPAddr` или `internet.ListenSystem` возвращают ошибку, `commander.Start` возвращает её, а `core.Instance.Start` прерывает запуск на первой ошибке feature. Xray **не запускается**; приложение получает ошибку запуска движка, состояние — `DEGRADED/ENGINE_DOWN`, откат на last-good по инвариантам §8.1. Это не `api_error` при работающем Xray.
+2. **Listener работает, но `ObservatoryService` не зарегистрирован** (например, опечатка в `api.services`). Xray работает, вызов `GetOutboundStatus` возвращает `Unimplemented`; публикуется `observability=error` с `error_code=unimplemented`. Отказ процесса Xray не объявляется.
+3. **Ошибка вызова RPC при работающем Xray** (таймаут, `DeadlineExceeded`). Публикуется `observability=error`; состояние процесса берётся из S2, а не из текста ошибки. `connection refused` сам по себе не классифицируется: сначала проверяется, запущен ли процесс; если нет — это `ENGINE_DOWN`.
+
+**Свежесть данных (U9-H2).** Свежесть считается по `last_try_time` (время последней попытки), а не по `last_seen_time` (время последнего успеха). Запись свежая, если `now − last_try_time ≤ TTL`, где `TTL = T_cycle + grace`. Оценка полного цикла: при `enableConcurrency: true` — `T_cycle = probeInterval + max_probe_time`; при `false` — `T_cycle = N × (probeInterval + max_probe_time)`, где `N` — число outbound в `subjectSelector`, `max_probe_time` — таймаут одной пробы (HTTP 5 с, TLS-handshake 5 с; №18 §7.2.1). `grace` — параметр реализации `[Т]`: численное значение не утверждено и требует измерения на целевой сборке. Запись с `last_try_time = 0` относится к `no_data`, а не к `stale`. Числа из формулы не подставляются как утверждённые: `probeInterval` берётся из конфигурации, `N` — из состава selector.
 
 ---
 
