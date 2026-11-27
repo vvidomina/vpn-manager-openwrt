@@ -154,7 +154,7 @@ graph TD
 | S2 | Процесс Xray | procd/ubus service, PID+start time | ≤ 5 с |
 | S3 | Конфигурация | хэш файла + `xray -test` + совпадение с генератором | при apply, затем ≤ 60 с |
 | S4 | Сетевая политика | наличие/счётчики цепочек, `ip rule`, route | ≤ 10 с |
-| S5 | Наблюдаемая доступность серверов (необязательный признак) | Xray Observatory через gRPC `ObservatoryService.GetOutboundStatus` на `127.0.0.1` (OQ-14, вариант B); собственной пробы нет | по формуле №20 §7.2 (`probeInterval` + 2 × `max_probe_time` — concurrent; `N × (probeInterval + max_probe_time)` — sequential); при ошибке API или отсутствии свежих записей признак не используется |
+| S5 | Наблюдаемая доступность серверов (необязательный признак) | Xray Observatory через gRPC `ObservatoryService.GetOutboundStatus` на `127.0.0.1` (OQ-14, вариант B); собственной пробы нет | по формуле №20 §7.2 (`probeInterval` + 2 × `max_probe_time` — concurrent; `N × (probeInterval + max_probe_time)` — sequential; `TTL = T_cycle + grace`); оценки расчётные, а не строгая гарантия реального времени: `grace = 2 с` (утверждено 27.11.2026: до 1 с — усечение секундного `last_try_time`, остаток — запас на накладные расходы), дедлайн gRPC — 2 с; при ошибке API или отсутствии свежих записей признак не используется |
 | S6 | Реальный трафик | пробный запрос через туннель + счётчики | при apply и ≤ 60 с |
 
 **Правило:** если любой признак старше своего TTL, состояние не может быть `ACTIVE` — выставляется `DEGRADED/STALE_SIGNALS` или `UNKNOWN`. Записанное значение (`mode=vpn`, `alive=1`) признаком не является.
@@ -179,7 +179,8 @@ stateDiagram-v2
     APPLYING --> ACTIVE: trial ok
     APPLYING --> ROLLING_BACK: trial/валидация fail
     ROLLING_BACK --> ACTIVE: last-good восстановлен
-    ACTIVE --> EMERGENCY_DIRECT: аварийное снятие перехвата
+    ROLLING_BACK --> DEGRADED: last-good не применён (ENGINE_DOWN)
+    ACTIVE --> EMERGENCY_DIRECT: явное аварийное снятие перехвата (отдельное действие)
     EMERGENCY_DIRECT --> STARTING: recovery
     ACTIVE --> WAN_DOWN: WAN/PPPoE down
     WAN_DOWN --> ACTIVE: WAN up + проверка
@@ -196,7 +197,7 @@ stateDiagram-v2
 | 2 | `intent=disabled` и процесс остановлен и правил нет | `DISABLED_BY_USER` |
 | 3 | `intent=disabled`, но процесс/правила ещё есть | `STOPPING` (до таймаута), затем `DEGRADED/RESIDUAL` |
 | 4 | WAN/PPPoE без default route | `WAN_DOWN` |
-| 5 | аварийный latch (ручное или автоматическое снятие) | `EMERGENCY_DIRECT` |
+| 5 | явный аварийный latch — отдельное аварийное действие, а не следствие отказа запуска или неудачного отката | `EMERGENCY_DIRECT` |
 | 6 | нет живых outbound среди серверов подписки (по Observatory), `direct_on_failure=true` | `FALLBACK_DIRECT` — вычисляется по данным gRPC API (OQ-14 B); факт применения `fallbackTag` не наблюдается |
 | 6a | то же, `direct_on_failure=false` | `FALLBACK_BLOCK` — то же условие |
 | 7 | процесс отсутствует при `intent=enabled` | `STARTING` (в пределах таймаута) → `DEGRADED/ENGINE_DOWN` |
@@ -261,7 +262,7 @@ stateDiagram-v2
 | P5 `APPLY_POLICY` | атомарно: route/rule → nft (никогда не оставлять правила на мёртвый порт) | вернуть предыдущую политику |
 | P6 `TRIAL` | проверка реального трафика через туннель; опционально canary-устройство | снять политику, вернуть last-good |
 | P7 `COMMIT` | запись `config=Applied`, last-good, событие, снятие блокировки | — |
-| P8 `ROLLBACK` | восстановление политики/конфига/процесса из last-good, проверка трафика | аварийный DIRECT + EMERGENCY |
+| P8 `ROLLBACK` | восстановление политики/конфига/процесса из last-good, проверка трафика | при неудаче — `DEGRADED/ENGINE_DOWN`, политика сохраняется, автоматического DIRECT нет (§7.3, №20 §8.2) |
 
 Длительности: `xray -test`, окно trial и полный бюджет отката — **[Т]** (W-04). До измерения используются консервативные значения из конфигурации с явным статусом «проектное допущение».
 
@@ -304,7 +305,7 @@ sequenceDiagram
 
 - Журнал транзакции пишется до и после каждой фазы (атомарная запись).
 - При старте: если последняя транзакция не в `COMMIT`, она считается незавершённой → восстановление last-good, удаление «осиротевших» правил, событие `recovered_after_crash`.
-- Если last-good отсутствует или невалиден → `EMERGENCY_DIRECT` (перехват не поднимается), интернет сохраняется, UI показывает причину.
+- Если last-good отсутствует или невалиден → `DEGRADED/ENGINE_DOWN`: перехват не поднимается, политика не удаляется, автоматического перехода в DIRECT нет, UI показывает причину. `EMERGENCY_DIRECT` в этом случае не выставляется: он требует отдельного явного аварийного действия (§7.1 P8, №20 §8.2, REQ-169).
 - Ограничение циклов: не более N попыток восстановления за интервал (значение — **[Т]**), затем ручное вмешательство.
 
 ---
@@ -360,14 +361,14 @@ sequenceDiagram
     participant FO as Failover
     SUP->>C: process exited (unexpected)
     C->>C: state=DEGRADED/ENGINE_DOWN
-    C->>PM: снять/не поднимать перехват (нет мёртвого порта)
+    C->>PM: правила сохраняются; listener мёртв (fail-closed)
     C->>FO: проверить WAN и сервер
     alt WAN ok и сервер ok
-        C->>C: restart с backoff
+        C->>C: respawn 3600 5 5 (procd)
         C->>PM: apply policy
         C->>C: verify traffic → ACTIVE
     else повторные падения
-        C->>C: EMERGENCY_DIRECT + событие
+        C->>C: остаётся DEGRADED/ENGINE_DOWN + событие; политика сохранена, DIRECT не включается; после исчерпания retry respawn прекращается, восстановление — только явным действием
     end
 ```
 
@@ -459,8 +460,8 @@ sequenceDiagram
 
 | Отказ | Обнаружение | Немедленное действие | Состояние | Восстановление | Риск для пользователя |
 |---|---|---|---|---|---|
-| Xray не стартует | exit code / нет слушателей | не поднимать перехват | `DEGRADED/ENGINE_DOWN` | backoff, затем EMERGENCY | интернет есть, VPN нет |
-| Xray упал после старта | procd/ubus + PID | правила сохраняются; listener мёртв | `DEGRADED/ENGINE_DOWN` | рестарт по backoff | краткий сбой перехвата; при `direct_on_failure=false` DIRECT не включается |
+| Xray не стартует | exit code / нет слушателей | не поднимать перехват | `DEGRADED/ENGINE_DOWN` | `respawn 3600 5 5`; после шестого быстрого отказа respawn прекращается, состояние остаётся `DEGRADED/ENGINE_DOWN`, восстановление — только явным действием | интернет есть, VPN нет; политика сохранена |
+| Xray упал после старта | procd/ubus + PID | правила сохраняются; listener мёртв | `DEGRADED/ENGINE_DOWN` | `respawn 3600 5 5`; счётчик сбрасывается после ≥ 3600 с непрерывной работы | краткий сбой перехвата; при `direct_on_failure=false` DIRECT не включается |
 | Ошибка конфига | `xray -test` | отменить apply | `config=Invalid` | last-good | нет |
 | Нет исходящего соединения | preflight/trial | откат | `DEGRADED/TRAFFIC_UNVERIFIED` | last-good; выбор сервера — Xray, не приложение | нет/краткий |
 | Ошибка nft | `nft -c`/exit | не применять | `DEGRADED/POLICY_NOT_APPLIED` | last-good | возможен DIRECT с предупреждением |
@@ -469,7 +470,7 @@ sequenceDiagram
 | DNS не отвечает | внешняя проверка (read-only) | не вмешиваться: DNS вне Xray и вне состояний VPN | состояние сервиса не меняется; при неподтверждённом трафике — `DEGRADED` | штатный DNS OpenWrt или действие пользователя | сайты не открываются |
 | `dnsmasq` упал | procd/ubus | вне области приложения: приложение не управляет DNS | состояние VPN не меняется | штатный OpenWrt | сайты не открываются |
 | Падение демона | procd | перезапуск демона | `UNKNOWN` → пересчёт | recovery по журналу | состояние может мигать |
-| Перезагрузка во время apply | журнал фаз | отбросить незавершённую | `ROLLING_BACK` → `ACTIVE/EMERGENCY` | last-good | краткий DIRECT |
+| Перезагрузка во время apply | журнал фаз | отбросить незавершённую | `ROLLING_BACK` → `ACTIVE` либо `DEGRADED/ENGINE_DOWN` | last-good | краткий DIRECT |
 | Нет места на Flash | statfs при prepare | запретить apply/backup | `DEGRADED/CONFIG_STALE` | очистка журнала/архивов | нет |
 | OOM | ядро/procd | перезапуск, снижение детализации логов | `UNKNOWN` | пересчёт | краткий сбой |
 | Появился глобальный IPv6 | — (в v1 не отслеживается) | никаких действий | состояние не меняется | — | принятый риск R3-01: клиент может выйти по IPv6 |
@@ -515,7 +516,7 @@ sequenceDiagram
 | Flash: демон + схемы | ≤ 15 МБ | [Т] |
 | `/tmp` подробные логи | ≤ 10 МБ, ротация | [Т] (W-07) |
 | Flash-журнал | 256 КБ + 1 ротация | [П], проверить W-07 |
-| Запуск | procd, respawn с backoff | [П] |
+| Запуск | procd, один instance через единственный launcher с `flock`; `respawn 3600 5 5` | [У] решения владельца №3, №4; реализация и техпроверки — [Т] |
 
 Свободно на устройстве: overlay 40.8 МБ, `/tmp` 116.7 МБ, RAM доступно 122.9 МБ (этап 1). Запас есть, но бинарник Xray уже занимает 28.3 МиБ.
 
