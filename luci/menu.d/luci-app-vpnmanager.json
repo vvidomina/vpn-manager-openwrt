@@ -1,0 +1,13 @@
+{
+	"admin/services/vpnmanager": {
+		"title": "VPN Manager",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "vpnmanager/overview"
+		},
+		"depends": {
+			"acl": ["luci-app-vpnmanager"]
+		}
+	}
+}

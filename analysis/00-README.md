@@ -124,6 +124,7 @@
 | [`45-implementation-readiness-matrix.md`](45-implementation-readiness-matrix.md) | **Новый.** Матрица готовности: документация (RD) / можно реализовывать (RI) / требует технической проверки (RT) / блокирует выпуск (RB); G1–G7, Observatory и gRPC, `fallbackTag`, singleton и `flock`, procd, AX3000T |
 | [`46-task-50-documentation-sync-report.md`](46-task-50-documentation-sync-report.md) | **Новый.** Отчёт задания №50: синхронизация README, №10 и №11, проверка остальных документов, список неоднозначностей, подтверждения об отсутствии кода, сборок и коммитов |
 | [`47-task-51-final-documentation-closure-report.md`](47-task-51-final-documentation-closure-report.md) | **Новый.** Задание №51: статус ревью в №7, терминология этапов (подготовка / Go skeleton / последующие), нумерация №10–№11, пометки исторических диаграмм, проверки и ограничения |
+| [`48-stage1-go-skeleton-implementation-report.md`](48-stage1-go-skeleton-implementation-report.md) | **Новый.** Задание №52: публикация документации U9 (`7a4d34c`), Go skeleton этапа 1 (структура, контракты, заглушки, `luci/`, init script), тесты, проверки и границы |
 
 Исторические документы сохраняют прежние формулировки (Blocklists, P0/P4, DNS Manager, `server_health` и т. п.) и приводятся только как история; действующими требованиями они не являются.
 
