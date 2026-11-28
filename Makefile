@@ -13,7 +13,9 @@ PKG ?= ./cmd/vpnmand
 
 all: fmt-check vet test build
 
+# Каталог сборки создаётся до компилятора: в чистом клоне $(OUTDIR) ещё нет.
 build:
+	@mkdir -p $(OUTDIR)
 	$(GO) build -o $(OUT) $(PKG)
 
 test:
@@ -31,6 +33,7 @@ fmt-check:
 
 # Кросс-компиляция под целевую платформу без cgo (вне сборочного SDK OpenWrt).
 cross:
+	@mkdir -p $(OUTDIR)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -o $(OUTDIR)/$(BIN)-linux-arm64 $(PKG)
 
 clean:

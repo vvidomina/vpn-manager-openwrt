@@ -117,7 +117,7 @@ func runWith(args []string, stderr io.Writer, done <-chan struct{}) int {
 	log.Info("демон запущен в foreground",
 		"state_dir", store.Root(), "state", string(c.Status().State), "ready", c.Ready())
 
-	svc := api.New(c, Version)
+	svc := api.New(c)
 	if health, hErr := svc.Health(ctx); hErr == nil {
 		log.Debug("внутренний health-ping", "ok", health.OK, "state", health.State, "ready", health.Ready)
 	}

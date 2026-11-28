@@ -14,9 +14,10 @@ import (
 )
 
 // Имена методов (№12 §2).
+// Реестр методов — №12 §6. Метода версии в реестре нет: версия публикуется
+// только CLI-флагом `vpnmand -version` и в diagnostics, не через RPC.
 const (
 	MethodStatus    = "vpnmanager.status"
-	MethodVersion   = "vpnmanager.version"
 	MethodOperation = "vpnmanager.operation"
 )
 
@@ -71,11 +72,6 @@ type HealthResult struct {
 	ObservedAt time.Time `json:"observed_at"`
 }
 
-// VersionResult — результат vpnmanager.version.
-type VersionResult struct {
-	Version string `json:"version"`
-}
-
 // OperationParams — параметры vpnmanager.operation.
 type OperationParams struct {
 	ID string `json:"id,omitempty"`
@@ -88,13 +84,12 @@ type OperationResult struct {
 
 // Service — реализация методов API.
 type Service struct {
-	core    Core
-	version string
+	core Core
 }
 
 // New создаёт сервис API.
-func New(core Core, version string) *Service {
-	return &Service{core: core, version: version}
+func New(core Core) *Service {
+	return &Service{core: core}
 }
 
 // Call выполняет запрос. Ошибка всегда возвращается в теле ответа.
@@ -105,8 +100,6 @@ func (s *Service) Call(ctx context.Context, req Request) Response {
 	switch req.Method {
 	case MethodStatus:
 		return s.status()
-	case MethodVersion:
-		return Response{OK: true, Result: VersionResult{Version: s.version}}
 	case MethodOperation:
 		return s.operation(req.Params)
 	default:

@@ -3,7 +3,7 @@
 		"description": "VPN Manager",
 		"read": {
 			"ubus": {
-				"vpnmanager": ["status", "version", "operation"]
+				"vpnmanager": ["status", "operation"]
 			}
 		},
 		"write": {

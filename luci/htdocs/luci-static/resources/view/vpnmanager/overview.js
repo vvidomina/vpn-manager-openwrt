@@ -4,20 +4,16 @@
 
 /*
  * Overview — единственная вью этапа 1. Обращается к демону только через
- * ubus-объект vpnmanager; при отсутствии объекта показывает сообщение о
- * недоступности, а не вымышленный успешный статус (№44 §3.8, №11 §13).
+ * ubus-метод vpnmanager.status из реестра №12 §6; при отсутствии объекта
+ * показывает сообщение о недоступности, а не вымышленный успешный статус
+ * (№44 §3.8, №11 §13). Отдельного метода версии в реестре нет, поэтому
+ * версия в интерфейсе не запрашивается и не подставляется.
  * Транспорт ubus в этапе 1 не реализован.
  */
 
 var callStatus = rpc.declare({
 	object: 'vpnmanager',
 	method: 'status',
-	expect: { }
-});
-
-var callVersion = rpc.declare({
-	object: 'vpnmanager',
-	method: 'version',
 	expect: { }
 });
 
@@ -30,16 +26,10 @@ function row(label, value) {
 
 return view.extend({
 	load: function() {
-		return Promise.all([
-			L.resolveDefault(callStatus(), null),
-			L.resolveDefault(callVersion(), null)
-		]);
+		return L.resolveDefault(callStatus(), null);
 	},
 
-	render: function(data) {
-		var status = data[0];
-		var version = data[1];
-
+	render: function(status) {
 		if (!status) {
 			return E('p', { 'class': 'alert-message warning' },
 				_('Демон VPN Manager недоступен: ubus-объект vpnmanager не зарегистрирован.'));
@@ -50,8 +40,7 @@ return view.extend({
 			row(_('Причина'), status.reason || '—'),
 			row(_('Конфигурация'), status.config ? (status.config + (status.config_error ? ': ' + status.config_error : '')) : '—'),
 			row(_('Готовность'), status.ready ? _('ядро запущено') : _('не готово')),
-			row(_('Наблюдение'), status.observed_at || _('нет данных')),
-			row(_('Версия'), version ? version.version : '—')
+			row(_('Наблюдение'), status.observed_at || _('нет данных'))
 		];
 
 		return E('div', { 'class': 'cbi-map' }, [

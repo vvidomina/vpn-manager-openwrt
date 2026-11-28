@@ -28,7 +28,7 @@ func newService() *Service {
 	return New(&fakeCore{
 		snap:  state.Derive(false, fixedTime()),
 		ready: true,
-	}, "0.1.0-stage1")
+	})
 }
 
 func TestStatus(t *testing.T) {
@@ -53,7 +53,7 @@ func TestStatus(t *testing.T) {
 
 func TestStatusWithInvalidConfig(t *testing.T) {
 	snap := state.NewSnapshot(state.ConfigInvalid, "неподдерживаемая schema_version: 9", true, fixedTime())
-	svc := New(&fakeCore{snap: snap, ready: false}, "v")
+	svc := New(&fakeCore{snap: snap, ready: false})
 	resp := svc.Call(context.Background(), Request{Method: MethodStatus})
 	if !resp.OK {
 		t.Fatalf("статус должен отдаваться и при невалидной конфигурации: %+v", resp)
@@ -78,7 +78,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestHealthNotReady(t *testing.T) {
-	svc := New(&fakeCore{snap: state.Derive(false, fixedTime()), ready: false}, "v")
+	svc := New(&fakeCore{snap: state.Derive(false, fixedTime()), ready: false})
 	res, err := svc.Health(context.Background())
 	if err != nil {
 		t.Fatalf("неожиданная ошибка: %v", err)
@@ -90,7 +90,7 @@ func TestHealthNotReady(t *testing.T) {
 
 func TestHealthInvalidConfigAndDegraded(t *testing.T) {
 	invalid := state.NewSnapshot(state.ConfigInvalid, "нет schema_version", true, fixedTime())
-	svc := New(&fakeCore{snap: invalid, ready: true}, "v")
+	svc := New(&fakeCore{snap: invalid, ready: true})
 	res, _ := svc.Health(context.Background())
 	if res.OK {
 		t.Fatal("health-ping не должен сообщать об успехе при config=Invalid")
@@ -100,7 +100,7 @@ func TestHealthInvalidConfigAndDegraded(t *testing.T) {
 	}
 
 	degraded := state.Degraded(state.ConfigSaved, "", "паника компонента", false, fixedTime())
-	svc = New(&fakeCore{snap: degraded, ready: true}, "v")
+	svc = New(&fakeCore{snap: degraded, ready: true})
 	res, _ = svc.Health(context.Background())
 	if res.OK {
 		t.Fatal("health-ping не должен сообщать об успехе в DEGRADED")
@@ -115,13 +115,18 @@ func TestHealthCanceledContext(t *testing.T) {
 	}
 }
 
-func TestVersion(t *testing.T) {
-	resp := newService().Call(context.Background(), Request{Method: MethodVersion})
-	if !resp.OK {
-		t.Fatalf("ожидался успешный ответ: %+v", resp)
+// Метода версии нет в реестре №12 §6: вызов отклоняется как неизвестный,
+// успешный ответ с версией не формируется.
+func TestVersionMethodNotRegistered(t *testing.T) {
+	resp := newService().Call(context.Background(), Request{Method: "vpnmanager.version"})
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("ожидалась ошибка: %+v", resp)
 	}
-	if v, ok := resp.Result.(VersionResult); !ok || v.Version != "0.1.0-stage1" {
-		t.Fatalf("неверная версия: %+v", resp.Result)
+	if resp.Error.Code != string(vmerrors.CodeUnsupported) {
+		t.Fatalf("код = %q, ожидался VM_ERR_UNSUPPORTED", resp.Error.Code)
+	}
+	if resp.Result != nil {
+		t.Fatalf("успешный результат не должен возвращаться: %+v", resp.Result)
 	}
 }
 

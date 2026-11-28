@@ -11,26 +11,14 @@ var callStatus = rpc.declare({
 	expect: { }
 });
 
-var callVersion = rpc.declare({
-	object: 'vpnmanager',
-	method: 'version',
-	expect: { }
-});
-
 return baseclass.extend({
 	title: _('VPN Manager'),
 
 	load: function() {
-		return Promise.all([
-			L.resolveDefault(callStatus(), null),
-			L.resolveDefault(callVersion(), null)
-		]);
+		return L.resolveDefault(callStatus(), null);
 	},
 
-	render: function(data) {
-		var status = data[0];
-		var version = data[1];
-
+	render: function(status) {
 		if (!status) {
 			return E('p', { 'class': 'alert-message warning' },
 				_('Демон VPN Manager недоступен: ubus-объект ещё не реализован (этап 1).'));
@@ -46,10 +34,6 @@ return baseclass.extend({
 				E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td left' }, _('Причина')),
 					E('td', { 'class': 'td left' }, status.reason || '—')
-				]),
-				E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td left' }, _('Версия')),
-					E('td', { 'class': 'td left' }, version ? version.version : '—')
 				])
 			])
 		]);
