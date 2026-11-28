@@ -1,6 +1,10 @@
 // Package config — базовая модель конфигурации VPN Manager (U9).
 // Допустимые значения полей определены документами №13 и №44 §3.2.
 // Пакет только читает и валидирует конфигурацию: файлы проекта не изменяются.
+//
+// Чтение выполняется через минимальную абстракцию Reader, которую реализует
+// internal/storage (граница Storage из №44 §2.2). Пакет не открывает файлы
+// сам и не зависит от storage, поэтому циклической зависимости нет.
 package config
 
 import (
@@ -8,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/vvidomina/vpn-manager-openwrt/internal/vmerrors"
@@ -16,6 +19,12 @@ import (
 
 // SchemaVersion — поддерживаемая версия схемы.
 const SchemaVersion = 1
+
+// Reader — минимальная абстракция чтения файла по имени внутри корня
+// хранилища. Реализуется *storage.Store; отсутствие файла — VM_ERR_NOT_FOUND.
+type Reader interface {
+	Read(name string) ([]byte, error)
+}
 
 // Intent — намерение пользователя.
 type Intent string
@@ -88,14 +97,10 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// Parse разбирает конфигурацию из JSON: неизвестные поля — ошибка,
+// ParseBytes разбирает конфигурацию из JSON: неизвестные поля — ошибка,
 // отсутствующие — заменяются значениями по умолчанию.
-func Parse(r io.Reader) (Config, error) {
-	raw, err := io.ReadAll(io.LimitReader(r, 1<<20))
-	if err != nil {
-		return Config{}, vmerrors.Wrap(vmerrors.CodeStorage, "config.parse", err)
-	}
-	raw = bytes.TrimSpace(raw)
+func ParseBytes(data []byte) (Config, error) {
+	raw := bytes.TrimSpace(data)
 	if len(raw) == 0 {
 		return Config{}, vmerrors.New(vmerrors.CodeValidation, "config.parse", "пустой файл конфигурации")
 	}
@@ -124,22 +129,33 @@ func Parse(r io.Reader) (Config, error) {
 	return cfg, nil
 }
 
-// Load читает конфигурацию из файла. Отсутствие файла — штатный первый
-// запуск: возвращаются значения по умолчанию и found=false.
-func Load(path string) (cfg Config, found bool, err error) {
-	if strings.TrimSpace(path) == "" {
-		return Config{}, false, vmerrors.New(vmerrors.CodeInvalidArgument, "config.load", "пустой путь к конфигурации")
-	}
-	f, err := os.Open(path)
+// Parse разбирает конфигурацию из потока (ограничение размера — 1 МиБ).
+func Parse(r io.Reader) (Config, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, 1<<20))
 	if err != nil {
-		if os.IsNotExist(err) {
+		return Config{}, vmerrors.Wrap(vmerrors.CodeStorage, "config.parse", err)
+	}
+	return ParseBytes(raw)
+}
+
+// Load читает конфигурацию через Storage-абстракцию. Отсутствие файла —
+// штатный первый запуск: возвращаются значения по умолчанию и found=false.
+func Load(r Reader, name string) (cfg Config, found bool, err error) {
+	if r == nil {
+		return Config{}, false, vmerrors.New(vmerrors.CodeInvalidArgument, "config.load", "хранилище не задано")
+	}
+	if strings.TrimSpace(name) == "" {
+		return Config{}, false, vmerrors.New(vmerrors.CodeInvalidArgument, "config.load", "пустое имя файла конфигурации")
+	}
+	data, err := r.Read(name)
+	if err != nil {
+		if vmerrors.Is(err, vmerrors.CodeNotFound) {
 			return Default(), false, nil
 		}
 		return Config{}, false, vmerrors.Wrap(vmerrors.CodeStorage, "config.load", err)
 	}
-	defer f.Close()
 
-	cfg, err = Parse(f)
+	cfg, err = ParseBytes(data)
 	if err != nil {
 		return Config{}, true, err
 	}

@@ -1,6 +1,6 @@
 // Package diagnostics — сборка диагностического отчёта.
 // Отчёт только читает состояние и конфигурацию; он не содержит секретов и не
-// изменяет систему.
+// изменяет систему (№11 §12).
 package diagnostics
 
 import (
@@ -13,12 +13,21 @@ const SchemaVersion = 1
 
 // Build собирает Report из текущего снимка и конфигурации.
 func Build(version string, cfg config.Config, snap state.Snapshot, warnings ...string) state.Report {
-	all := make([]string, 0, len(warnings)+2)
+	all := make([]string, 0, len(warnings)+3)
 	all = append(all, warnings...)
+
+	if snap.Config == state.ConfigInvalid {
+		msg := "config=Invalid: конфигурация не прошла валидацию, операции изменения недоступны"
+		if snap.ConfigError != "" {
+			msg += ": " + snap.ConfigError
+		}
+		all = append(all, msg)
+	}
 	if cfg.Intent == config.IntentEnabled && snap.State != state.StateActive {
 		all = append(all, "intent=enabled, но состояние "+string(snap.State)+": сетевые признаки в этапе 1 не наблюдаются")
 	}
 	all = append(all, "этап 1: управление Xray, nftables и сетью не реализовано")
+
 	return state.Report{
 		Version:       version,
 		SchemaVersion: SchemaVersion,

@@ -1,6 +1,7 @@
 package state
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,9 @@ func TestDeriveDisabled(t *testing.T) {
 	snap := Derive(false, fixedClock())
 	if snap.State != StateDisabledByUser {
 		t.Fatalf("состояние = %q, ожидалось DISABLED_BY_USER", snap.State)
+	}
+	if snap.Config != ConfigSaved {
+		t.Fatalf("config = %q, ожидалось Saved", snap.Config)
 	}
 	if err := snap.Validate(); err != nil {
 		t.Fatalf("снимок невалиден: %v", err)
@@ -35,6 +39,44 @@ func TestDeriveEnabledStaysStarting(t *testing.T) {
 	}
 }
 
+func TestInvalidConfigIsDegradedNotActive(t *testing.T) {
+	snap := NewSnapshot(ConfigInvalid, "неподдерживаемая schema_version: 9", true, fixedClock())
+	if snap.State != StateDegraded {
+		t.Fatalf("состояние = %q, ожидалось DEGRADED", snap.State)
+	}
+	if snap.Config != ConfigInvalid || snap.ConfigError == "" {
+		t.Fatalf("ось конфигурации не отражена: %+v", snap)
+	}
+	if !strings.Contains(snap.Reason, "CONFIG_STALE") {
+		t.Fatalf("причина не указывает CONFIG_STALE: %q", snap.Reason)
+	}
+	if err := snap.Validate(); err != nil {
+		t.Fatalf("снимок невалиден: %v", err)
+	}
+	var s3 Signal
+	for _, sig := range snap.Signals {
+		if sig.Name == SignalConfig {
+			s3 = sig
+		}
+		if sig.Name == SignalIntent && sig.Known {
+			t.Fatal("при невалидной конфигурации намерение неизвестно и не должно считаться известным")
+		}
+	}
+	if !s3.Known || s3.Value != "invalid" {
+		t.Fatalf("признак S3 = %+v, ожидался известный invalid", s3)
+	}
+}
+
+func TestDegradedKeepsConfigAxis(t *testing.T) {
+	snap := Degraded(ConfigSaved, "", "DEGRADED: паника компонента policy", false, fixedClock())
+	if snap.State != StateDegraded || snap.Config != ConfigSaved {
+		t.Fatalf("снимок деградации: %+v", snap)
+	}
+	if err := snap.Validate(); err != nil {
+		t.Fatalf("снимок невалиден: %v", err)
+	}
+}
+
 func TestStoreRejectsActiveWithoutSignals(t *testing.T) {
 	store := NewStore()
 	err := store.Set(Snapshot{State: StateActive})
@@ -46,10 +88,24 @@ func TestStoreRejectsActiveWithoutSignals(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsActiveWithInvalidConfig(t *testing.T) {
+	store := NewStore()
+	now := fixedClock()
+	snap := Snapshot{State: StateActive, Config: ConfigInvalid, Signals: []Signal{
+		{Name: SignalProcess, Value: "running", Known: true, At: now},
+		{Name: SignalConfig, Value: "invalid", Known: true, At: now},
+		{Name: SignalPolicy, Value: "installed", Known: true, At: now},
+		{Name: SignalTraffic, Value: "ok", Known: true, At: now},
+	}}
+	if err := store.Set(snap); !vmerrors.Is(err, vmerrors.CodeInvalidState) {
+		t.Fatalf("ожидался VM_ERR_INVALID_STATE, получено %v", err)
+	}
+}
+
 func TestStoreAcceptsActiveWithSignals(t *testing.T) {
 	store := NewStore()
 	now := fixedClock()
-	snap := Snapshot{State: StateActive, Signals: []Signal{
+	snap := Snapshot{State: StateActive, Config: ConfigApplied, Signals: []Signal{
 		{Name: SignalProcess, Value: "running", Known: true, At: now},
 		{Name: SignalConfig, Value: "capture", Known: true, At: now},
 		{Name: SignalPolicy, Value: "installed", Known: true, At: now},

@@ -10,9 +10,9 @@ import (
 	"github.com/vvidomina/vpn-manager-openwrt/internal/vmerrors"
 )
 
-// State — состояние системы (№10 §5.1). В этапе 1 вычисляются только
-// DISABLED_BY_USER, STARTING, DEGRADED и UNKNOWN: признаки S2–S6 неизвестны,
-// поэтому ACTIVE недостижим, а переходы сетевых состояний не реализуются.
+// State — фактическое состояние системы (№10 §5.1, вторая ось). В этапе 1
+// вычисляются только DISABLED_BY_USER, STARTING, DEGRADED и UNKNOWN: признаки
+// S2–S6 неизвестны, поэтому ACTIVE недостижим.
 type State string
 
 const (
@@ -29,6 +29,17 @@ const (
 	StateStopping        State = "STOPPING"
 	StateMaintenance     State = "MAINTENANCE"
 	StateUnknown         State = "UNKNOWN"
+)
+
+// ConfigState — первая ось модели №10 §5.1: состояние намерения и
+// конфигурации. Это не состояние VPN-сервиса и не признак S2–S6.
+type ConfigState string
+
+const (
+	ConfigSaved            ConfigState = "Saved"
+	ConfigApplied          ConfigState = "Applied"
+	ConfigPendingReconnect ConfigState = "PendingReconnect"
+	ConfigInvalid          ConfigState = "Invalid"
 )
 
 // Имена признаков (№10 §5.2). S1 — намерение, S5 — наблюдаемость outbound,
@@ -54,11 +65,15 @@ type Signal struct {
 }
 
 // Snapshot — неизменяемый снимок состояния для API и диагностики.
+// Config/ConfigError отражают первую ось модели №10 §5.1; невалидная
+// конфигурация видна в снимке и не подменяется «всё хорошо».
 type Snapshot struct {
-	State      State     `json:"state"`
-	Reason     string    `json:"reason,omitempty"`
-	Signals    []Signal  `json:"signals"`
-	ObservedAt time.Time `json:"observed_at"`
+	State       State       `json:"state"`
+	Reason      string      `json:"reason,omitempty"`
+	Config      ConfigState `json:"config,omitempty"`
+	ConfigError string      `json:"config_error,omitempty"`
+	Signals     []Signal    `json:"signals"`
+	ObservedAt  time.Time   `json:"observed_at"`
 }
 
 // Report — диагностический отчёт (read-only).
@@ -69,10 +84,15 @@ type Report struct {
 	Warnings      []string `json:"warnings"`
 }
 
-// Validate проверяет инвариант: ACTIVE невозможен без известных S2, S3, S4, S6.
+// Validate проверяет инвариант: ACTIVE невозможен без известных S2, S3, S4, S6
+// и при невалидной конфигурации.
 func (s Snapshot) Validate() error {
 	if s.State != StateActive {
 		return nil
+	}
+	if s.Config == ConfigInvalid {
+		return vmerrors.New(vmerrors.CodeInvalidState, "state.validate",
+			"состояние ACTIVE невозможно при config=Invalid")
 	}
 	for _, name := range requiredSignals {
 		sig, ok := s.signal(name)
@@ -145,11 +165,23 @@ func (s *Store) Snapshot() Snapshot {
 	return s.snap.Clone()
 }
 
-// Derive вычисляет стартовое состояние по намерению пользователя.
+// Derive вычисляет стартовое состояние по намерению пользователя при
+// валидной конфигурации (см. NewSnapshot).
+func Derive(intentEnabled bool, now time.Time) Snapshot {
+	return NewSnapshot(ConfigSaved, "", intentEnabled, now)
+}
+
+// NewSnapshot вычисляет стартовое состояние по правилам №10 §5.3:
+//   - config=Invalid → DEGRADED/CONFIG_STALE (ACTIVE и работа VPN запрещены,
+//     демон остаётся диагностически доступным);
+//   - intent=disabled → DISABLED_BY_USER;
+//   - intent=enabled → STARTING (S2–S6 в этапе 1 не наблюдаются).
+//
 // В этапе 1 известен только S1; остальные признаки помечаются unknown,
 // поэтому состояние выше STARTING не поднимается.
-func Derive(intentEnabled bool, now time.Time) Snapshot {
+func NewSnapshot(cfgState ConfigState, cfgErr string, intentEnabled bool, now time.Time) Snapshot {
 	snap := Snapshot{
+		Config:     cfgState,
 		ObservedAt: now,
 		Signals: []Signal{
 			{Name: SignalIntent, Value: intentValue(intentEnabled), At: now, Known: true},
@@ -160,6 +192,24 @@ func Derive(intentEnabled bool, now time.Time) Snapshot {
 			{Name: SignalTraffic, At: now, Known: false},
 		},
 	}
+	if cfgState == ConfigInvalid {
+		snap.State = StateDegraded
+		snap.Reason = "DEGRADED/CONFIG_STALE: " + cfgErr
+		snap.ConfigError = cfgErr
+		// S3 (конфигурация) известен как отрицательный: валидация не прошла.
+		// Остальные признаки остаются ненаблюдаемыми.
+		for i := range snap.Signals {
+			if snap.Signals[i].Name == SignalConfig {
+				snap.Signals[i].Value = "invalid"
+				snap.Signals[i].Known = true
+			}
+			if snap.Signals[i].Name == SignalIntent {
+				snap.Signals[i].Known = false
+				snap.Signals[i].Value = "unknown"
+			}
+		}
+		return snap
+	}
 	if intentEnabled {
 		snap.State = StateStarting
 		snap.Reason = "признаки S2–S6 в этапе 1 не наблюдаются (not_implemented)"
@@ -167,6 +217,15 @@ func Derive(intentEnabled bool, now time.Time) Snapshot {
 		snap.State = StateDisabledByUser
 		snap.Reason = "intent=disabled"
 	}
+	return snap
+}
+
+// Degraded возвращает снимок DEGRADED с причиной отказа. Подпричина из
+// №10 §5.1 не изобретается: причина передаётся текстом вызывающим.
+func Degraded(cfgState ConfigState, cfgErr, reason string, intentEnabled bool, now time.Time) Snapshot {
+	snap := NewSnapshot(cfgState, cfgErr, intentEnabled, now)
+	snap.State = StateDegraded
+	snap.Reason = reason
 	return snap
 }
 

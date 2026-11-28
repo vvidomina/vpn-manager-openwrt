@@ -50,11 +50,25 @@ type Response struct {
 
 // StatusResult — результат vpnmanager.status.
 type StatusResult struct {
-	State      string         `json:"state"`
-	Reason     string         `json:"reason,omitempty"`
-	Ready      bool           `json:"ready"`
-	ObservedAt time.Time      `json:"observed_at"`
-	Signals    []state.Signal `json:"signals"`
+	State       string         `json:"state"`
+	Reason      string         `json:"reason,omitempty"`
+	Config      string         `json:"config,omitempty"`
+	ConfigError string         `json:"config_error,omitempty"`
+	Ready       bool           `json:"ready"`
+	ObservedAt  time.Time      `json:"observed_at"`
+	Signals     []state.Signal `json:"signals"`
+}
+
+// HealthResult — внутренний health-ping демона для границы API.
+// Это не метод ubus: в реестре №12 §6 такого метода нет, а регистрировать
+// метод вне реестра запрещено (№44 §3.5). Проверка только читает состояние.
+type HealthResult struct {
+	OK         bool      `json:"ok"`
+	State      string    `json:"state"`
+	Config     string    `json:"config,omitempty"`
+	Ready      bool      `json:"ready"`
+	Reason     string    `json:"reason,omitempty"`
+	ObservedAt time.Time `json:"observed_at"`
 }
 
 // VersionResult — результат vpnmanager.version.
@@ -103,12 +117,36 @@ func (s *Service) Call(ctx context.Context, req Request) Response {
 func (s *Service) status() Response {
 	snap := s.core.Status()
 	return Response{OK: true, Result: StatusResult{
-		State:      string(snap.State),
-		Reason:     snap.Reason,
-		Ready:      s.core.Ready(),
-		ObservedAt: snap.ObservedAt,
-		Signals:    snap.Signals,
+		State:       string(snap.State),
+		Reason:      snap.Reason,
+		Config:      string(snap.Config),
+		ConfigError: snap.ConfigError,
+		Ready:       s.core.Ready(),
+		ObservedAt:  snap.ObservedAt,
+		Signals:     snap.Signals,
 	}}
+}
+
+// Health выполняет внутренний health-ping. Успех означает «ядро готово и
+// нет запрещающих состояний»; недоступность не маскируется успешным ответом.
+func (s *Service) Health(ctx context.Context) (HealthResult, error) {
+	if err := ctx.Err(); err != nil {
+		return HealthResult{}, vmerrors.Wrap(vmerrors.CodeTimeout, "api.health", err)
+	}
+	snap := s.core.Status()
+	ready := s.core.Ready()
+	res := HealthResult{
+		State:      string(snap.State),
+		Config:     string(snap.Config),
+		Ready:      ready,
+		Reason:     snap.Reason,
+		ObservedAt: snap.ObservedAt,
+	}
+	res.OK = ready && snap.Config != state.ConfigInvalid &&
+		snap.State != state.StateUnknown &&
+		snap.State != state.StateDegraded &&
+		snap.State != state.StateEmergencyDirect
+	return res, nil
 }
 
 func (s *Service) operation(params json.RawMessage) Response {
